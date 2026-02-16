@@ -1,39 +1,12 @@
 use color_eyre::{eyre::eyre, Result};
-use serde::{Deserialize, Serialize};
-use std::env;
+use std::process::Command;
 
-#[derive(Serialize)]
-struct Message {
-    role: String,
-    content: String,
-}
-
-#[derive(Serialize)]
-struct ApiRequest {
-    model: String,
-    max_tokens: u32,
-    messages: Vec<Message>,
-}
-
-#[derive(Deserialize)]
-struct ContentBlock {
-    text: Option<String>,
-}
-
-#[derive(Deserialize)]
-struct ApiResponse {
-    content: Vec<ContentBlock>,
-}
-
-/// Use Claude to fill in field values based on session name and context
+/// Use Claude CLI to fill in field values based on session name and context
 pub fn fill_fields(
     session_name: &str,
     fields: &[(String, String)], // (name, description) pairs
     pane_content: Option<&str>,
 ) -> Result<Vec<String>> {
-    let api_key = env::var("ANTHROPIC_API_KEY")
-        .map_err(|_| eyre!("ANTHROPIC_API_KEY not set"))?;
-
     let fields_desc: String = fields
         .iter()
         .enumerate()
@@ -69,36 +42,24 @@ Respond with ONLY a JSON array of strings, one value per field in order. Use emp
         session_name, fields_desc, context
     );
 
-    let request = ApiRequest {
-        model: "claude-3-5-haiku-latest".to_string(),
-        max_tokens: 1024,
-        messages: vec![Message {
-            role: "user".to_string(),
-            content: prompt,
-        }],
-    };
+    let output = Command::new("claude")
+        .args(["-p", &prompt, "--output-format", "json", "--model", "haiku"])
+        .output()
+        .map_err(|e| eyre!("Failed to run claude: {}", e))?;
 
-    let client = reqwest::blocking::Client::new();
-    let response = client
-        .post("https://api.anthropic.com/v1/messages")
-        .header("x-api-key", &api_key)
-        .header("anthropic-version", "2023-06-01")
-        .header("content-type", "application/json")
-        .json(&request)
-        .send()?;
-
-    if !response.status().is_success() {
-        return Err(eyre!("API request failed: {}", response.status()));
+    if !output.status.success() {
+        return Err(eyre!("claude command failed"));
     }
 
-    let api_response: ApiResponse = response.json()?;
-    let text = api_response
-        .content
-        .first()
-        .and_then(|c| c.text.as_ref())
-        .ok_or_else(|| eyre!("No response content"))?;
+    let response: serde_json::Value = serde_json::from_slice(&output.stdout)
+        .map_err(|_| eyre!("Failed to parse claude output as JSON"))?;
 
-    // Parse JSON array from response
+    // Extract the result text from claude's JSON output
+    let text = response["result"]
+        .as_str()
+        .ok_or_else(|| eyre!("No result in claude output"))?;
+
+    // Parse JSON array from the result
     let values: Vec<String> = serde_json::from_str(text.trim())
         .map_err(|_| eyre!("Failed to parse AI response as JSON array"))?;
 
