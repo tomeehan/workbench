@@ -33,8 +33,8 @@ fn render_kanban_view(app: &App, frame: &mut Frame) {
 
     if app.input_mode == InputMode::NewSession {
         render_input_popup(app, frame, "New Session");
-    } else if app.input_mode == InputMode::RenameSession {
-        render_input_popup(app, frame, "Rename Session");
+    } else if app.input_mode == InputMode::EditSession {
+        render_edit_session_popup(app, frame);
     } else if app.input_mode == InputMode::MoveSession {
         render_move_popup(frame);
     }
@@ -285,6 +285,86 @@ fn render_input_popup(app: &App, frame: &mut Frame, title: &str) {
         .block(Block::default().borders(Borders::BOTTOM).title("Name"));
 
     frame.render_widget(input, inner);
+}
+
+fn render_edit_session_popup(app: &App, frame: &mut Frame) {
+    let num_fields = app.fields.len();
+    let total_rows = 1 + num_fields;
+    let popup_height = std::cmp::min(20 + (num_fields * 3) as u16, 80);
+    let area = centered_rect(60, popup_height, frame.area());
+    frame.render_widget(Clear, area);
+
+    let block = Block::default()
+        .title(" Edit Session (Tab/↑↓ to navigate, Enter to save) ")
+        .borders(Borders::ALL)
+        .style(Style::default().bg(Color::Black));
+
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    // Create constraints for each row
+    let constraints: Vec<Constraint> = (0..total_rows)
+        .map(|_| Constraint::Length(3))
+        .collect();
+    let rows = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints(constraints)
+        .split(inner);
+
+    // Render name field (row 0)
+    let name_selected = app.edit_row == 0;
+    let name_style = if name_selected {
+        Style::default().fg(Color::Yellow)
+    } else {
+        Style::default().fg(Color::DarkGray)
+    };
+    let name_value = if name_selected {
+        app.input_buffer.as_str()
+    } else {
+        app.edit_session_name.as_str()
+    };
+    let name_block = Block::default()
+        .borders(Borders::BOTTOM)
+        .title(if name_selected { "> Name" } else { "  Name" })
+        .border_style(name_style);
+    let name_input = Paragraph::new(name_value)
+        .style(name_style)
+        .block(name_block);
+    if !rows.is_empty() {
+        frame.render_widget(name_input, rows[0]);
+    }
+
+    // Render custom fields
+    for (i, field) in app.fields.iter().enumerate() {
+        let row_idx = i + 1;
+        if row_idx >= rows.len() {
+            break;
+        }
+        let is_selected = app.edit_row == row_idx;
+        let style = if is_selected {
+            Style::default().fg(Color::Yellow)
+        } else {
+            Style::default().fg(Color::DarkGray)
+        };
+        let value = if is_selected {
+            app.input_buffer.as_str()
+        } else {
+            app.edit_field_values.get(i).map(|s| s.as_str()).unwrap_or("")
+        };
+        let title = if is_selected {
+            format!("> {}", field.name)
+        } else {
+            format!("  {}", field.name)
+        };
+        let field_block = Block::default()
+            .borders(Borders::BOTTOM)
+            .title(title)
+            .border_style(style);
+        let field_input = Paragraph::new(value)
+            .style(style)
+            .block(field_block);
+        frame.render_widget(field_input, rows[row_idx]);
+    }
 }
 
 fn render_move_popup(frame: &mut Frame) {

@@ -131,6 +131,16 @@ impl Database {
                 display_order INTEGER NOT NULL DEFAULT 0,
                 FOREIGN KEY (project_id) REFERENCES projects(id)
             );
+
+            CREATE TABLE IF NOT EXISTS session_field_values (
+                id INTEGER PRIMARY KEY,
+                session_id INTEGER NOT NULL,
+                field_id INTEGER NOT NULL,
+                value TEXT NOT NULL DEFAULT '',
+                FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE,
+                FOREIGN KEY (field_id) REFERENCES fields(id) ON DELETE CASCADE,
+                UNIQUE(session_id, field_id)
+            );
             ",
         )?;
         Ok(())
@@ -335,5 +345,33 @@ impl Database {
             }
         }
         Ok(())
+    }
+
+    pub fn get_session_field_value(&self, session_id: i64, field_id: i64) -> Result<String> {
+        let result: Result<String, _> = self.conn.query_row(
+            "SELECT value FROM session_field_values WHERE session_id = ?1 AND field_id = ?2",
+            params![session_id, field_id],
+            |row| row.get(0),
+        );
+        Ok(result.unwrap_or_default())
+    }
+
+    pub fn set_session_field_value(&self, session_id: i64, field_id: i64, value: &str) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO session_field_values (session_id, field_id, value) VALUES (?1, ?2, ?3)
+             ON CONFLICT(session_id, field_id) DO UPDATE SET value = ?3",
+            params![session_id, field_id, value],
+        )?;
+        Ok(())
+    }
+
+    pub fn get_all_session_field_values(&self, session_id: i64) -> Result<Vec<(i64, String)>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT field_id, value FROM session_field_values WHERE session_id = ?1",
+        )?;
+        let values = stmt.query_map(params![session_id], |row| {
+            Ok((row.get(0)?, row.get(1)?))
+        })?;
+        values.collect::<Result<Vec<_>, _>>().map_err(Into::into)
     }
 }

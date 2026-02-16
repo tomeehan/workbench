@@ -18,7 +18,7 @@ pub enum View {
 pub enum InputMode {
     Normal,
     NewSession,
-    RenameSession,
+    EditSession,
     MoveSession,
     NewFieldName,
     NewFieldDesc,
@@ -46,6 +46,9 @@ pub struct App {
     pub editing_session_id: Option<i64>,
     pub moving_session_id: Option<i64>,
     pub peek_active: bool,
+    pub edit_row: usize,
+    pub edit_session_name: String,
+    pub edit_field_values: Vec<String>,
     pub view: View,
     pub fields: Vec<Field>,
     pub selected_field: usize,
@@ -90,6 +93,9 @@ impl App {
             editing_session_id: None,
             moving_session_id: None,
             peek_active: false,
+            edit_row: 0,
+            edit_session_name: String::new(),
+            edit_field_values: Vec::new(),
             view: View::default(),
             fields,
             selected_field: 0,
@@ -167,7 +173,7 @@ impl App {
                         }
                     }
                     InputMode::NewSession => self.handle_input_key(key)?,
-                    InputMode::RenameSession => self.handle_rename_key(key)?,
+                    InputMode::EditSession => self.handle_edit_session_key(key)?,
                     InputMode::MoveSession => self.handle_move_key(key)?,
                     InputMode::NewFieldName => self.handle_new_field_name_key(key)?,
                     InputMode::NewFieldDesc => self.handle_new_field_desc_key(key)?,
@@ -235,8 +241,15 @@ impl App {
                     let session_id = session.id;
                     let session_name = session.name.clone();
                     self.editing_session_id = Some(session_id);
+                    self.edit_session_name = session_name.clone();
+                    self.edit_row = 0;
                     self.input_buffer = session_name;
-                    self.input_mode = InputMode::RenameSession;
+                    // Load field values
+                    let field_values: Vec<String> = self.fields.iter().map(|f| {
+                        self.db.get_session_field_value(session_id, f.id).unwrap_or_default()
+                    }).collect();
+                    self.edit_field_values = field_values;
+                    self.input_mode = InputMode::EditSession;
                 }
             }
             KeyCode::Enter => {
@@ -307,23 +320,54 @@ impl App {
         Ok(())
     }
 
-    fn handle_rename_key(&mut self, key: KeyEvent) -> Result<()> {
+    fn handle_edit_session_key(&mut self, key: KeyEvent) -> Result<()> {
+        let total_rows = 1 + self.fields.len(); // name + custom fields
         match key.code {
             KeyCode::Esc => {
                 self.input_mode = InputMode::Normal;
                 self.input_buffer.clear();
                 self.editing_session_id = None;
+                self.edit_session_name.clear();
+                self.edit_field_values.clear();
+            }
+            KeyCode::Tab | KeyCode::Down => {
+                self.save_current_edit_row();
+                if self.edit_row < total_rows - 1 {
+                    self.edit_row += 1;
+                } else {
+                    self.edit_row = 0;
+                }
+                self.load_current_edit_row();
+            }
+            KeyCode::BackTab | KeyCode::Up => {
+                self.save_current_edit_row();
+                if self.edit_row > 0 {
+                    self.edit_row -= 1;
+                } else {
+                    self.edit_row = total_rows - 1;
+                }
+                self.load_current_edit_row();
             }
             KeyCode::Enter => {
-                if !self.input_buffer.is_empty() {
-                    if let Some(session_id) = self.editing_session_id {
-                        self.db.update_session_name(session_id, &self.input_buffer)?;
-                        self.refresh_sessions()?;
+                self.save_current_edit_row();
+                if let Some(session_id) = self.editing_session_id {
+                    // Save name
+                    if !self.edit_session_name.is_empty() {
+                        self.db.update_session_name(session_id, &self.edit_session_name)?;
                     }
+                    // Save all field values
+                    for (i, field) in self.fields.iter().enumerate() {
+                        if let Some(value) = self.edit_field_values.get(i) {
+                            self.db.set_session_field_value(session_id, field.id, value)?;
+                        }
+                    }
+                    self.refresh_sessions()?;
                 }
                 self.input_mode = InputMode::Normal;
                 self.input_buffer.clear();
                 self.editing_session_id = None;
+                self.edit_session_name.clear();
+                self.edit_field_values.clear();
             }
             KeyCode::Backspace => {
                 self.input_buffer.pop();
@@ -334,6 +378,30 @@ impl App {
             _ => {}
         }
         Ok(())
+    }
+
+    fn save_current_edit_row(&mut self) {
+        if self.edit_row == 0 {
+            self.edit_session_name = self.input_buffer.clone();
+        } else {
+            let field_idx = self.edit_row - 1;
+            if field_idx < self.edit_field_values.len() {
+                self.edit_field_values[field_idx] = self.input_buffer.clone();
+            }
+        }
+    }
+
+    fn load_current_edit_row(&mut self) {
+        if self.edit_row == 0 {
+            self.input_buffer = self.edit_session_name.clone();
+        } else {
+            let field_idx = self.edit_row - 1;
+            if let Some(value) = self.edit_field_values.get(field_idx) {
+                self.input_buffer = value.clone();
+            } else {
+                self.input_buffer.clear();
+            }
+        }
     }
 
     fn handle_move_key(&mut self, key: KeyEvent) -> Result<()> {
