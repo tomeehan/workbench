@@ -325,14 +325,22 @@ fn render_input_popup(app: &App, frame: &mut Frame, title: &str) {
 }
 
 fn render_edit_session_popup(app: &App, frame: &mut Frame) {
+    use crate::app::EditMode;
+
     let num_fields = app.fields.len();
     let total_rows = 1 + num_fields;
     let popup_height = std::cmp::min(20 + (num_fields * 3) as u16, 80);
     let area = centered_rect(60, popup_height, frame.area());
     frame.render_widget(Clear, area);
 
+    let mode_str = match app.edit_mode {
+        EditMode::Manual => "Manual",
+        EditMode::AI => "AI ✨",
+    };
+    let title = format!(" Edit Session [{}] (Shift+Tab: mode, Tab/↑↓: nav, Enter: save) ", mode_str);
+
     let block = Block::default()
-        .title(" Edit Session (Tab/↑↓ to navigate, Enter to save) ")
+        .title(title)
         .borders(Borders::ALL)
         .style(Style::default().bg(Color::Black));
 

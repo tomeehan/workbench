@@ -26,6 +26,13 @@ pub enum InputMode {
     EditFieldDesc,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum EditMode {
+    #[default]
+    Manual,
+    AI,
+}
+
 #[derive(Debug, Clone)]
 pub enum AppAction {
     None,
@@ -49,6 +56,8 @@ pub struct App {
     pub edit_row: usize,
     pub edit_session_name: String,
     pub edit_field_values: Vec<String>,
+    pub edit_mode: EditMode,
+    pub ai_loading: bool,
     pub view: View,
     pub fields: Vec<Field>,
     pub selected_field: usize,
@@ -96,6 +105,8 @@ impl App {
             edit_row: 0,
             edit_session_name: String::new(),
             edit_field_values: Vec::new(),
+            edit_mode: EditMode::default(),
+            ai_loading: false,
             view: View::default(),
             fields,
             selected_field: 0,
@@ -329,6 +340,19 @@ impl App {
                 self.editing_session_id = None;
                 self.edit_session_name.clear();
                 self.edit_field_values.clear();
+                self.edit_mode = EditMode::Manual;
+            }
+            // Shift+Tab cycles between Manual and AI mode
+            KeyCode::BackTab if key.modifiers.contains(KeyModifiers::SHIFT) => {
+                self.save_current_edit_row();
+                self.edit_mode = match self.edit_mode {
+                    EditMode::Manual => EditMode::AI,
+                    EditMode::AI => EditMode::Manual,
+                };
+                // If switching to AI mode, run AI fill
+                if self.edit_mode == EditMode::AI {
+                    self.run_ai_fill();
+                }
             }
             KeyCode::Tab | KeyCode::Down => {
                 self.save_current_edit_row();
@@ -368,6 +392,7 @@ impl App {
                 self.editing_session_id = None;
                 self.edit_session_name.clear();
                 self.edit_field_values.clear();
+                self.edit_mode = EditMode::Manual;
             }
             KeyCode::Backspace => {
                 self.input_buffer.pop();
@@ -378,6 +403,41 @@ impl App {
             _ => {}
         }
         Ok(())
+    }
+
+    fn run_ai_fill(&mut self) {
+        use crate::ai;
+
+        let fields: Vec<(String, String)> = self.fields
+            .iter()
+            .map(|f| (f.name.clone(), f.description.clone()))
+            .collect();
+
+        if fields.is_empty() {
+            return;
+        }
+
+        // Get tmux pane content if available
+        let pane_content = self.editing_session_id
+            .and_then(|id| self.sessions.iter().find(|s| s.id == id))
+            .and_then(|s| s.tmux_window.as_ref())
+            .and_then(|name| tmux::capture_pane_content(name));
+
+        match ai::fill_fields(&self.edit_session_name, &fields, pane_content.as_deref()) {
+            Ok(values) => {
+                // Update field values with AI suggestions
+                for (i, value) in values.into_iter().enumerate() {
+                    if i < self.edit_field_values.len() && !value.is_empty() {
+                        self.edit_field_values[i] = value;
+                    }
+                }
+                // Reload current row to reflect changes
+                self.load_current_edit_row();
+            }
+            Err(_) => {
+                // Silently fail - user can still edit manually
+            }
+        }
     }
 
     fn save_current_edit_row(&mut self) {
