@@ -66,6 +66,15 @@ pub struct Session {
     pub claude_session_id: Option<String>,
 }
 
+#[derive(Debug, Clone)]
+pub struct Field {
+    pub id: i64,
+    pub project_id: i64,
+    pub name: String,
+    pub description: String,
+    pub display_order: i64,
+}
+
 pub struct Database {
     conn: Connection,
 }
@@ -111,6 +120,15 @@ impl Database {
                 claude_session_id TEXT,
                 created_at TEXT DEFAULT CURRENT_TIMESTAMP,
                 updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (project_id) REFERENCES projects(id)
+            );
+
+            CREATE TABLE IF NOT EXISTS fields (
+                id INTEGER PRIMARY KEY,
+                project_id INTEGER NOT NULL,
+                name TEXT NOT NULL,
+                description TEXT NOT NULL DEFAULT '',
+                display_order INTEGER NOT NULL DEFAULT 0,
                 FOREIGN KEY (project_id) REFERENCES projects(id)
             );
             ",
@@ -232,6 +250,90 @@ impl Database {
             "UPDATE sessions SET tmux_window = NULL, updated_at = CURRENT_TIMESTAMP WHERE id = ?1",
             params![session_id],
         )?;
+        Ok(())
+    }
+
+    pub fn list_fields(&self, project_id: i64) -> Result<Vec<Field>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, project_id, name, description, display_order
+             FROM fields WHERE project_id = ?1 ORDER BY display_order, id",
+        )?;
+
+        let fields = stmt.query_map(params![project_id], |row| {
+            Ok(Field {
+                id: row.get(0)?,
+                project_id: row.get(1)?,
+                name: row.get(2)?,
+                description: row.get(3)?,
+                display_order: row.get(4)?,
+            })
+        })?;
+
+        fields.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+    }
+
+    pub fn create_field(&self, project_id: i64, name: &str, description: &str) -> Result<Field> {
+        let max_order: i64 = self.conn.query_row(
+            "SELECT COALESCE(MAX(display_order), -1) FROM fields WHERE project_id = ?1",
+            params![project_id],
+            |row| row.get(0),
+        )?;
+
+        self.conn.execute(
+            "INSERT INTO fields (project_id, name, description, display_order) VALUES (?1, ?2, ?3, ?4)",
+            params![project_id, name, description, max_order + 1],
+        )?;
+
+        let id = self.conn.last_insert_rowid();
+        Ok(Field {
+            id,
+            project_id,
+            name: name.to_string(),
+            description: description.to_string(),
+            display_order: max_order + 1,
+        })
+    }
+
+    pub fn update_field(&self, field_id: i64, name: &str, description: &str) -> Result<()> {
+        self.conn.execute(
+            "UPDATE fields SET name = ?1, description = ?2 WHERE id = ?3",
+            params![name, description, field_id],
+        )?;
+        Ok(())
+    }
+
+    pub fn delete_field(&self, field_id: i64) -> Result<()> {
+        self.conn.execute("DELETE FROM fields WHERE id = ?1", params![field_id])?;
+        Ok(())
+    }
+
+    pub fn move_field_up(&self, project_id: i64, field_id: i64) -> Result<()> {
+        let fields = self.list_fields(project_id)?;
+        let idx = fields.iter().position(|f| f.id == field_id);
+        if let Some(i) = idx {
+            if i > 0 {
+                let prev_id = fields[i - 1].id;
+                let prev_order = fields[i - 1].display_order;
+                let curr_order = fields[i].display_order;
+                self.conn.execute("UPDATE fields SET display_order = ?1 WHERE id = ?2", params![prev_order, field_id])?;
+                self.conn.execute("UPDATE fields SET display_order = ?1 WHERE id = ?2", params![curr_order, prev_id])?;
+            }
+        }
+        Ok(())
+    }
+
+    pub fn move_field_down(&self, project_id: i64, field_id: i64) -> Result<()> {
+        let fields = self.list_fields(project_id)?;
+        let idx = fields.iter().position(|f| f.id == field_id);
+        if let Some(i) = idx {
+            if i < fields.len() - 1 {
+                let next_id = fields[i + 1].id;
+                let next_order = fields[i + 1].display_order;
+                let curr_order = fields[i].display_order;
+                self.conn.execute("UPDATE fields SET display_order = ?1 WHERE id = ?2", params![next_order, field_id])?;
+                self.conn.execute("UPDATE fields SET display_order = ?1 WHERE id = ?2", params![curr_order, next_id])?;
+            }
+        }
         Ok(())
     }
 }

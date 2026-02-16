@@ -6,11 +6,18 @@ use ratatui::{
     Frame,
 };
 
-use crate::app::{App, InputMode};
+use crate::app::{App, InputMode, View};
 use crate::db::Status;
 use crate::tmux;
 
 pub fn render(app: &App, frame: &mut Frame) {
+    match app.view {
+        View::Kanban => render_kanban_view(app, frame),
+        View::Settings => render_settings_view(app, frame),
+    }
+}
+
+fn render_kanban_view(app: &App, frame: &mut Frame) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
@@ -22,7 +29,7 @@ pub fn render(app: &App, frame: &mut Frame) {
 
     render_header(app, frame, chunks[0]);
     render_kanban(app, frame, chunks[1]);
-    render_footer(app, frame, chunks[2]);
+    render_kanban_footer(frame, chunks[2]);
 
     if app.input_mode == InputMode::NewSession {
         render_input_popup(app, frame, "New Session");
@@ -35,6 +42,112 @@ pub fn render(app: &App, frame: &mut Frame) {
     if app.peek_active {
         render_peek_overlay(app, frame);
     }
+}
+
+fn render_settings_view(app: &App, frame: &mut Frame) {
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(3), // header
+            Constraint::Min(0),    // fields list
+            Constraint::Length(1), // footer
+        ])
+        .split(frame.area());
+
+    let header = Paragraph::new("Settings: Custom Fields")
+        .style(Style::default().fg(Color::Cyan))
+        .block(Block::default().borders(Borders::BOTTOM));
+    frame.render_widget(header, chunks[0]);
+
+    render_fields_list(app, frame, chunks[1]);
+
+    let help = "q/Esc: back | n: new field | e: edit | d: delete | jk: navigate | JK: reorder";
+    let footer = Paragraph::new(help).style(Style::default().fg(Color::DarkGray));
+    frame.render_widget(footer, chunks[2]);
+
+    match app.input_mode {
+        InputMode::NewFieldName => render_field_popup(app, frame, "New Field", "Name", &app.new_field_name),
+        InputMode::NewFieldDesc => render_field_popup(app, frame, "New Field", "Description", &app.new_field_desc),
+        InputMode::EditFieldName => render_field_popup(app, frame, "Edit Field", "Name", &app.new_field_name),
+        InputMode::EditFieldDesc => render_field_popup(app, frame, "Edit Field", "Description", &app.new_field_desc),
+        _ => {}
+    }
+}
+
+fn render_fields_list(app: &App, frame: &mut Frame, area: Rect) {
+    let items: Vec<ListItem> = app
+        .fields
+        .iter()
+        .enumerate()
+        .map(|(idx, field)| {
+            let is_selected = idx == app.selected_field;
+            let style = if is_selected {
+                Style::default()
+                    .fg(Color::Black)
+                    .bg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(Color::White)
+            };
+
+            let text = if field.description.is_empty() {
+                field.name.clone()
+            } else {
+                format!("{} - {}", field.name, field.description)
+            };
+            ListItem::new(text).style(style)
+        })
+        .collect();
+
+    let block = Block::default()
+        .title(" Fields ")
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Yellow));
+
+    let list = List::new(items).block(block);
+    frame.render_widget(list, area);
+}
+
+fn render_field_popup(app: &App, frame: &mut Frame, title: &str, field_label: &str, value: &str) {
+    let area = centered_rect(50, 30, frame.area());
+    frame.render_widget(Clear, area);
+
+    let block = Block::default()
+        .title(format!(" {} ", title))
+        .borders(Borders::ALL)
+        .style(Style::default().bg(Color::Black));
+
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    let inner_chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(3), Constraint::Length(3)])
+        .split(inner);
+
+    // Show name field
+    let name_style = if field_label == "Name" {
+        Style::default().fg(Color::Yellow)
+    } else {
+        Style::default().fg(Color::DarkGray)
+    };
+    let name_value = if field_label == "Name" { value } else { &app.new_field_name };
+    let name_input = Paragraph::new(name_value.to_string())
+        .style(name_style)
+        .block(Block::default().borders(Borders::BOTTOM).title("Name"));
+    frame.render_widget(name_input, inner_chunks[0]);
+
+    // Show description field
+    let desc_style = if field_label == "Description" {
+        Style::default().fg(Color::Yellow)
+    } else {
+        Style::default().fg(Color::DarkGray)
+    };
+    let desc_value = if field_label == "Description" { value } else { &app.new_field_desc };
+    let desc_input = Paragraph::new(desc_value.to_string())
+        .style(desc_style)
+        .block(Block::default().borders(Borders::BOTTOM).title("Description"));
+    frame.render_widget(desc_input, inner_chunks[1]);
 }
 
 fn render_header(app: &App, frame: &mut Frame, area: Rect) {
@@ -127,8 +240,8 @@ fn render_kanban(app: &App, frame: &mut Frame, area: Rect) {
     }
 }
 
-fn render_footer(_app: &App, frame: &mut Frame, area: Rect) {
-    let help = "q: quit | n: new | e: edit | Space: peek | hjkl: navigate | m: move | d: delete | r: refresh | Enter: terminal";
+fn render_kanban_footer(frame: &mut Frame, area: Rect) {
+    let help = "q: quit | n: new | e: edit | Space: peek | hjkl: navigate | m: move | d: delete | r: refresh | s: settings | Enter: terminal";
     let footer = Paragraph::new(help).style(Style::default().fg(Color::DarkGray));
     frame.render_widget(footer, area);
 }

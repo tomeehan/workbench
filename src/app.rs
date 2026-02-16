@@ -4,8 +4,15 @@ use std::time::Duration;
 use color_eyre::Result;
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers};
 
-use crate::db::{Database, Project, Session, Status};
+use crate::db::{Database, Field, Project, Session, Status};
 use crate::tmux;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum View {
+    #[default]
+    Kanban,
+    Settings,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InputMode {
@@ -13,6 +20,10 @@ pub enum InputMode {
     NewSession,
     RenameSession,
     MoveSession,
+    NewFieldName,
+    NewFieldDesc,
+    EditFieldName,
+    EditFieldDesc,
 }
 
 #[derive(Debug, Clone)]
@@ -35,6 +46,12 @@ pub struct App {
     pub editing_session_id: Option<i64>,
     pub moving_session_id: Option<i64>,
     pub peek_active: bool,
+    pub view: View,
+    pub fields: Vec<Field>,
+    pub selected_field: usize,
+    pub editing_field_id: Option<i64>,
+    pub new_field_name: String,
+    pub new_field_desc: String,
 }
 
 impl App {
@@ -49,6 +66,7 @@ impl App {
 
         let project = db.get_or_create_project(project_name, &project_path)?;
         let sessions = db.list_sessions(project.id)?;
+        let fields = db.list_fields(project.id)?;
         let active_tmux_sessions: HashSet<String> = tmux::list_workbench_sessions().into_iter().collect();
 
         // Check which sessions are waiting for user input
@@ -72,6 +90,12 @@ impl App {
             editing_session_id: None,
             moving_session_id: None,
             peek_active: false,
+            view: View::default(),
+            fields,
+            selected_field: 0,
+            editing_field_id: None,
+            new_field_name: String::new(),
+            new_field_desc: String::new(),
         })
     }
 
@@ -91,6 +115,11 @@ impl App {
     pub fn refresh_sessions(&mut self) -> Result<()> {
         self.sessions = self.db.list_sessions(self.project.id)?;
         self.refresh_tmux_sessions();
+        Ok(())
+    }
+
+    pub fn refresh_fields(&mut self) -> Result<()> {
+        self.fields = self.db.list_fields(self.project.id)?;
         Ok(())
     }
 
@@ -131,10 +160,19 @@ impl App {
         if event::poll(Duration::from_millis(100))? {
             if let Event::Key(key) = event::read()? {
                 match self.input_mode {
-                    InputMode::Normal => return self.handle_normal_key(key),
+                    InputMode::Normal => {
+                        match self.view {
+                            View::Kanban => return self.handle_normal_key(key),
+                            View::Settings => self.handle_settings_key(key)?,
+                        }
+                    }
                     InputMode::NewSession => self.handle_input_key(key)?,
                     InputMode::RenameSession => self.handle_rename_key(key)?,
                     InputMode::MoveSession => self.handle_move_key(key)?,
+                    InputMode::NewFieldName => self.handle_new_field_name_key(key)?,
+                    InputMode::NewFieldDesc => self.handle_new_field_desc_key(key)?,
+                    InputMode::EditFieldName => self.handle_edit_field_name_key(key)?,
+                    InputMode::EditFieldDesc => self.handle_edit_field_desc_key(key)?,
                 }
             }
         }
@@ -208,6 +246,10 @@ impl App {
                 if self.selected_session().and_then(|s| s.tmux_window.as_ref()).is_some() {
                     self.peek_active = !self.peek_active;
                 }
+            }
+            KeyCode::Char('s') => {
+                self.view = View::Settings;
+                self.selected_field = 0;
             }
             _ => {}
         }
@@ -311,6 +353,170 @@ impl App {
                 }
                 self.input_mode = InputMode::Normal;
                 self.moving_session_id = None;
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    fn handle_settings_key(&mut self, key: KeyEvent) -> Result<()> {
+        match key.code {
+            KeyCode::Char('q') | KeyCode::Esc => {
+                self.view = View::Kanban;
+            }
+            KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.should_quit = true;
+            }
+            KeyCode::Char('j') | KeyCode::Down => {
+                if !self.fields.is_empty() && self.selected_field < self.fields.len() - 1 {
+                    self.selected_field += 1;
+                }
+            }
+            KeyCode::Char('k') | KeyCode::Up => {
+                if self.selected_field > 0 {
+                    self.selected_field -= 1;
+                }
+            }
+            KeyCode::Char('n') => {
+                self.new_field_name.clear();
+                self.new_field_desc.clear();
+                self.input_mode = InputMode::NewFieldName;
+            }
+            KeyCode::Char('e') => {
+                if let Some(field) = self.fields.get(self.selected_field) {
+                    self.editing_field_id = Some(field.id);
+                    self.new_field_name = field.name.clone();
+                    self.new_field_desc = field.description.clone();
+                    self.input_mode = InputMode::EditFieldName;
+                }
+            }
+            KeyCode::Char('d') => {
+                if let Some(field) = self.fields.get(self.selected_field) {
+                    self.db.delete_field(field.id)?;
+                    self.refresh_fields()?;
+                    if self.selected_field >= self.fields.len() && self.selected_field > 0 {
+                        self.selected_field -= 1;
+                    }
+                }
+            }
+            KeyCode::Char('K') => {
+                if let Some(field) = self.fields.get(self.selected_field) {
+                    self.db.move_field_up(self.project.id, field.id)?;
+                    self.refresh_fields()?;
+                    if self.selected_field > 0 {
+                        self.selected_field -= 1;
+                    }
+                }
+            }
+            KeyCode::Char('J') => {
+                if let Some(field) = self.fields.get(self.selected_field) {
+                    self.db.move_field_down(self.project.id, field.id)?;
+                    self.refresh_fields()?;
+                    if self.selected_field < self.fields.len() - 1 {
+                        self.selected_field += 1;
+                    }
+                }
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    fn handle_new_field_name_key(&mut self, key: KeyEvent) -> Result<()> {
+        match key.code {
+            KeyCode::Esc => {
+                self.input_mode = InputMode::Normal;
+                self.new_field_name.clear();
+                self.new_field_desc.clear();
+            }
+            KeyCode::Enter => {
+                if !self.new_field_name.is_empty() {
+                    self.input_mode = InputMode::NewFieldDesc;
+                }
+            }
+            KeyCode::Backspace => {
+                self.new_field_name.pop();
+            }
+            KeyCode::Char(c) => {
+                self.new_field_name.push(c);
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    fn handle_new_field_desc_key(&mut self, key: KeyEvent) -> Result<()> {
+        match key.code {
+            KeyCode::Esc => {
+                self.input_mode = InputMode::Normal;
+                self.new_field_name.clear();
+                self.new_field_desc.clear();
+            }
+            KeyCode::Enter => {
+                self.db.create_field(self.project.id, &self.new_field_name, &self.new_field_desc)?;
+                self.refresh_fields()?;
+                self.input_mode = InputMode::Normal;
+                self.new_field_name.clear();
+                self.new_field_desc.clear();
+            }
+            KeyCode::Backspace => {
+                self.new_field_desc.pop();
+            }
+            KeyCode::Char(c) => {
+                self.new_field_desc.push(c);
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    fn handle_edit_field_name_key(&mut self, key: KeyEvent) -> Result<()> {
+        match key.code {
+            KeyCode::Esc => {
+                self.input_mode = InputMode::Normal;
+                self.editing_field_id = None;
+                self.new_field_name.clear();
+                self.new_field_desc.clear();
+            }
+            KeyCode::Enter => {
+                if !self.new_field_name.is_empty() {
+                    self.input_mode = InputMode::EditFieldDesc;
+                }
+            }
+            KeyCode::Backspace => {
+                self.new_field_name.pop();
+            }
+            KeyCode::Char(c) => {
+                self.new_field_name.push(c);
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    fn handle_edit_field_desc_key(&mut self, key: KeyEvent) -> Result<()> {
+        match key.code {
+            KeyCode::Esc => {
+                self.input_mode = InputMode::Normal;
+                self.editing_field_id = None;
+                self.new_field_name.clear();
+                self.new_field_desc.clear();
+            }
+            KeyCode::Enter => {
+                if let Some(field_id) = self.editing_field_id {
+                    self.db.update_field(field_id, &self.new_field_name, &self.new_field_desc)?;
+                    self.refresh_fields()?;
+                }
+                self.input_mode = InputMode::Normal;
+                self.editing_field_id = None;
+                self.new_field_name.clear();
+                self.new_field_desc.clear();
+            }
+            KeyCode::Backspace => {
+                self.new_field_desc.pop();
+            }
+            KeyCode::Char(c) => {
+                self.new_field_desc.push(c);
             }
             _ => {}
         }
