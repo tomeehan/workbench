@@ -206,8 +206,32 @@ impl Database {
         Ok(())
     }
 
+    pub fn update_session_name(&self, session_id: i64, name: &str) -> Result<()> {
+        self.conn.execute(
+            "UPDATE sessions SET name = ?1, updated_at = CURRENT_TIMESTAMP WHERE id = ?2",
+            params![name, session_id],
+        )?;
+        Ok(())
+    }
+
     pub fn delete_session(&self, session_id: i64) -> Result<()> {
         self.conn.execute("DELETE FROM sessions WHERE id = ?1", params![session_id])?;
+        Ok(())
+    }
+
+    pub fn set_tmux_session(&self, session_id: i64, tmux_name: &str) -> Result<()> {
+        self.conn.execute(
+            "UPDATE sessions SET tmux_window = ?1, updated_at = CURRENT_TIMESTAMP WHERE id = ?2",
+            params![tmux_name, session_id],
+        )?;
+        Ok(())
+    }
+
+    pub fn clear_tmux_session(&self, session_id: i64) -> Result<()> {
+        self.conn.execute(
+            "UPDATE sessions SET tmux_window = NULL, updated_at = CURRENT_TIMESTAMP WHERE id = ?1",
+            params![session_id],
+        )?;
         Ok(())
     }
 }

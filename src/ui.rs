@@ -24,7 +24,9 @@ pub fn render(app: &App, frame: &mut Frame) {
     render_footer(app, frame, chunks[2]);
 
     if app.input_mode == InputMode::NewSession {
-        render_new_session_popup(app, frame);
+        render_input_popup(app, frame, "New Session");
+    } else if app.input_mode == InputMode::RenameSession {
+        render_input_popup(app, frame, "Rename Session");
     }
 }
 
@@ -66,13 +68,43 @@ fn render_kanban(app: &App, frame: &mut Frame, area: Rect) {
                     Style::default().fg(Color::White)
                 };
 
+                let mut spans = Vec::new();
+
+                // Add yellow ? indicator for sessions waiting for input, or green $ for active terminals
+                if app.is_waiting_for_input(session) {
+                    let indicator_style = if is_selected {
+                        Style::default()
+                            .fg(Color::Yellow)
+                            .bg(Color::Yellow)
+                            .add_modifier(Modifier::BOLD)
+                    } else {
+                        Style::default()
+                            .fg(Color::Yellow)
+                            .add_modifier(Modifier::BOLD)
+                    };
+                    spans.push(Span::styled("? ", indicator_style));
+                } else if app.has_active_terminal(session) {
+                    let indicator_style = if is_selected {
+                        Style::default()
+                            .fg(Color::Green)
+                            .bg(Color::Yellow)
+                            .add_modifier(Modifier::BOLD)
+                    } else {
+                        Style::default()
+                            .fg(Color::Green)
+                            .add_modifier(Modifier::BOLD)
+                    };
+                    spans.push(Span::styled("$ ", indicator_style));
+                }
+
                 let content = if let Some(ticket) = &session.ticket_id {
                     format!("[{}] {}", ticket, session.name)
                 } else {
                     session.name.clone()
                 };
+                spans.push(Span::styled(content, style));
 
-                ListItem::new(Line::from(Span::styled(content, style)))
+                ListItem::new(Line::from(spans))
             })
             .collect();
 
@@ -89,17 +121,17 @@ fn render_kanban(app: &App, frame: &mut Frame, area: Rect) {
 }
 
 fn render_footer(_app: &App, frame: &mut Frame, area: Rect) {
-    let help = "q: quit | n: new | hjkl: navigate | m: move | d: delete | r: refresh";
+    let help = "q: quit | n: new | e: edit | hjkl: navigate | m: move | d: delete | r: refresh | Enter: terminal";
     let footer = Paragraph::new(help).style(Style::default().fg(Color::DarkGray));
     frame.render_widget(footer, area);
 }
 
-fn render_new_session_popup(app: &App, frame: &mut Frame) {
+fn render_input_popup(app: &App, frame: &mut Frame, title: &str) {
     let area = centered_rect(50, 20, frame.area());
     frame.render_widget(Clear, area);
 
     let block = Block::default()
-        .title(" New Session ")
+        .title(format!(" {} ", title))
         .borders(Borders::ALL)
         .style(Style::default().bg(Color::Black));
 
