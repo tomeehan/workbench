@@ -28,6 +28,8 @@ pub fn render(app: &App, frame: &mut Frame) {
         render_input_popup(app, frame, "New Session");
     } else if app.input_mode == InputMode::RenameSession {
         render_input_popup(app, frame, "Rename Session");
+    } else if app.input_mode == InputMode::MoveSession {
+        render_move_popup(frame);
     }
 
     if app.peek_active {
@@ -170,6 +172,32 @@ fn render_input_popup(app: &App, frame: &mut Frame, title: &str) {
         .block(Block::default().borders(Borders::BOTTOM).title("Name"));
 
     frame.render_widget(input, inner);
+}
+
+fn render_move_popup(frame: &mut Frame) {
+    let area = centered_rect(30, 25, frame.area());
+    frame.render_widget(Clear, area);
+
+    let block = Block::default()
+        .title(" Move to ")
+        .borders(Borders::ALL)
+        .style(Style::default().bg(Color::Black));
+
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    let statuses = Status::all();
+    let items: Vec<ListItem> = statuses
+        .iter()
+        .enumerate()
+        .map(|(i, status)| {
+            let text = format!("{}: {}", i + 1, status.label());
+            ListItem::new(text).style(Style::default().fg(Color::White))
+        })
+        .collect();
+
+    let list = List::new(items);
+    frame.render_widget(list, inner);
 }
 
 fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {

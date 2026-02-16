@@ -12,6 +12,7 @@ pub enum InputMode {
     Normal,
     NewSession,
     RenameSession,
+    MoveSession,
 }
 
 #[derive(Debug, Clone)]
@@ -32,6 +33,7 @@ pub struct App {
     pub active_tmux_sessions: HashSet<String>,
     pub sessions_waiting_input: HashSet<String>,
     pub editing_session_id: Option<i64>,
+    pub moving_session_id: Option<i64>,
     pub peek_active: bool,
 }
 
@@ -68,6 +70,7 @@ impl App {
             active_tmux_sessions,
             sessions_waiting_input,
             editing_session_id: None,
+            moving_session_id: None,
             peek_active: false,
         })
     }
@@ -131,6 +134,7 @@ impl App {
                     InputMode::Normal => return self.handle_normal_key(key),
                     InputMode::NewSession => self.handle_input_key(key)?,
                     InputMode::RenameSession => self.handle_rename_key(key)?,
+                    InputMode::MoveSession => self.handle_move_key(key)?,
                 }
             }
         }
@@ -173,14 +177,8 @@ impl App {
             }
             KeyCode::Char('m') => {
                 if let Some(session) = self.selected_session() {
-                    let session_id = session.id;
-                    let current_status = session.status;
-                    let statuses = Status::all();
-                    let current_idx = statuses.iter().position(|s| *s == current_status).unwrap_or(0);
-                    let next_idx = (current_idx + 1) % statuses.len();
-                    let new_status = statuses[next_idx];
-                    self.db.update_session_status(session_id, new_status)?;
-                    self.refresh_sessions()?;
+                    self.moving_session_id = Some(session.id);
+                    self.input_mode = InputMode::MoveSession;
                 }
             }
             KeyCode::Char('d') => {
@@ -290,6 +288,29 @@ impl App {
             }
             KeyCode::Char(c) => {
                 self.input_buffer.push(c);
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    fn handle_move_key(&mut self, key: KeyEvent) -> Result<()> {
+        match key.code {
+            KeyCode::Esc => {
+                self.input_mode = InputMode::Normal;
+                self.moving_session_id = None;
+            }
+            KeyCode::Char(c @ '1'..='4') => {
+                let idx = (c as usize) - ('1' as usize);
+                let statuses = Status::all();
+                if idx < statuses.len() {
+                    if let Some(session_id) = self.moving_session_id {
+                        self.db.update_session_status(session_id, statuses[idx])?;
+                        self.refresh_sessions()?;
+                    }
+                }
+                self.input_mode = InputMode::Normal;
+                self.moving_session_id = None;
             }
             _ => {}
         }
