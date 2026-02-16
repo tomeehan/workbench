@@ -21,11 +21,12 @@ pub fn fill_fields(
         .join("\n");
 
     let context = if let Some(content) = pane_content {
-        // Take last 2000 chars of pane content for context
-        let trimmed = if content.len() > 2000 {
-            &content[content.len() - 2000..]
+        // Take last 2000 chars of pane content for context (handle UTF-8 properly)
+        let char_count = content.chars().count();
+        let trimmed = if char_count > 2000 {
+            content.chars().skip(char_count - 2000).collect::<String>()
         } else {
-            content
+            content.to_string()
         };
         format!("\n\nTerminal content:\n{}", trimmed)
     } else {
