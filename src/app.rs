@@ -32,6 +32,7 @@ pub struct App {
     pub active_tmux_sessions: HashSet<String>,
     pub sessions_waiting_input: HashSet<String>,
     pub editing_session_id: Option<i64>,
+    pub peek_active: bool,
 }
 
 impl App {
@@ -67,6 +68,7 @@ impl App {
             active_tmux_sessions,
             sessions_waiting_input,
             editing_session_id: None,
+            peek_active: false,
         })
     }
 
@@ -203,6 +205,11 @@ impl App {
             }
             KeyCode::Enter => {
                 return self.handle_enter_key();
+            }
+            KeyCode::Char(' ') => {
+                if self.selected_session().and_then(|s| s.tmux_window.as_ref()).is_some() {
+                    self.peek_active = !self.peek_active;
+                }
             }
             _ => {}
         }

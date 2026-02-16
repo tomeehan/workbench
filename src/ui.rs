@@ -8,6 +8,7 @@ use ratatui::{
 
 use crate::app::{App, InputMode};
 use crate::db::Status;
+use crate::tmux;
 
 pub fn render(app: &App, frame: &mut Frame) {
     let chunks = Layout::default()
@@ -27,6 +28,10 @@ pub fn render(app: &App, frame: &mut Frame) {
         render_input_popup(app, frame, "New Session");
     } else if app.input_mode == InputMode::RenameSession {
         render_input_popup(app, frame, "Rename Session");
+    }
+
+    if app.peek_active {
+        render_peek_overlay(app, frame);
     }
 }
 
@@ -121,9 +126,31 @@ fn render_kanban(app: &App, frame: &mut Frame, area: Rect) {
 }
 
 fn render_footer(_app: &App, frame: &mut Frame, area: Rect) {
-    let help = "q: quit | n: new | e: edit | hjkl: navigate | m: move | d: delete | r: refresh | Enter: terminal";
+    let help = "q: quit | n: new | e: edit | Space: peek | hjkl: navigate | m: move | d: delete | r: refresh | Enter: terminal";
     let footer = Paragraph::new(help).style(Style::default().fg(Color::DarkGray));
     frame.render_widget(footer, area);
+}
+
+fn render_peek_overlay(app: &App, frame: &mut Frame) {
+    let Some(session) = app.selected_session() else { return };
+    let Some(ref tmux_name) = session.tmux_window else { return };
+
+    let content = tmux::capture_pane_content(tmux_name)
+        .unwrap_or_else(|| "(no content)".to_string());
+
+    let area = centered_rect(80, 70, frame.area());
+    frame.render_widget(Clear, area);
+
+    let block = Block::default()
+        .title(format!(" {} ", session.name))
+        .borders(Borders::ALL)
+        .style(Style::default().bg(Color::Black));
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    let para = Paragraph::new(content)
+        .style(Style::default().fg(Color::White));
+    frame.render_widget(para, inner);
 }
 
 fn render_input_popup(app: &App, frame: &mut Frame, title: &str) {

@@ -73,6 +73,19 @@ pub fn list_workbench_sessions() -> Vec<String> {
     }
 }
 
+/// Capture the content of a tmux pane
+pub fn capture_pane_content(name: &str) -> Option<String> {
+    let output = Command::new("tmux")
+        .args(["capture-pane", "-t", name, "-p"])
+        .output()
+        .ok()?;
+    if output.status.success() {
+        Some(String::from_utf8_lossy(&output.stdout).to_string())
+    } else {
+        None
+    }
+}
+
 /// Check if a tmux session is waiting for user input by examining pane content
 pub fn is_waiting_for_input(name: &str) -> bool {
     let output = Command::new("tmux")
