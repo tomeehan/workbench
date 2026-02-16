@@ -174,98 +174,107 @@ fn render_kanban(app: &App, frame: &mut Frame, area: Rect) {
             Style::default().fg(Color::DarkGray)
         };
 
-        let items: Vec<ListItem> = sessions
-            .iter()
-            .enumerate()
-            .map(|(row_idx, session)| {
-                render_session_card(app, session, is_selected_column, row_idx)
-            })
-            .collect();
-
+        // Render column header
         let title = format!(" {} ({}) ", status.label(), sessions.len());
-        let list = List::new(items).block(
-            Block::default()
-                .title(title)
-                .borders(Borders::ALL)
-                .border_style(border_style),
-        );
+        let column_block = Block::default()
+            .title(title)
+            .borders(Borders::ALL)
+            .border_style(border_style);
+        let inner_area = column_block.inner(columns[col_idx]);
+        frame.render_widget(column_block, columns[col_idx]);
 
-        frame.render_widget(list, columns[col_idx]);
+        // Calculate card heights and render each card
+        let card_height = 4 + app.fields.len() as u16; // base height + fields
+        let mut y_offset = 0u16;
+
+        for (row_idx, session) in sessions.iter().enumerate() {
+            if y_offset >= inner_area.height {
+                break; // No more room
+            }
+
+            let card_area = Rect {
+                x: inner_area.x,
+                y: inner_area.y + y_offset,
+                width: inner_area.width,
+                height: card_height.min(inner_area.height - y_offset),
+            };
+
+            render_session_card(app, frame, session, is_selected_column, row_idx, card_area);
+            y_offset += card_height;
+        }
     }
 }
 
-fn render_session_card<'a>(app: &App, session: &Session, is_selected_column: bool, row_idx: usize) -> ListItem<'a> {
+fn render_session_card(app: &App, frame: &mut Frame, session: &Session, is_selected_column: bool, row_idx: usize, area: Rect) {
     let is_selected = is_selected_column && row_idx == app.selected_row;
 
-    let name_style = if is_selected {
-        Style::default()
-            .fg(Color::Black)
-            .bg(Color::Yellow)
-            .add_modifier(Modifier::BOLD)
-    } else {
-        Style::default().fg(Color::White).add_modifier(Modifier::BOLD)
-    };
-
-    let detail_style = if is_selected {
-        Style::default().fg(Color::Black).bg(Color::Yellow)
+    let border_style = if is_selected {
+        Style::default().fg(Color::Yellow)
     } else {
         Style::default().fg(Color::DarkGray)
     };
 
+    let name_style = if is_selected {
+        Style::default().fg(Color::White).add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(Color::White).add_modifier(Modifier::BOLD)
+    };
+
+    let detail_style = Style::default().fg(Color::DarkGray);
+
+    // Build card title with indicator
+    let title = if app.is_waiting_for_input(session) {
+        format!(" ? {} ", session.name)
+    } else if app.has_active_terminal(session) {
+        format!(" $ {} ", session.name)
+    } else {
+        format!(" {} ", session.name)
+    };
+
+    let title_style = if app.is_waiting_for_input(session) {
+        Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
+    } else if app.has_active_terminal(session) {
+        Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)
+    } else {
+        name_style
+    };
+
+    let card_block = Block::default()
+        .title(Span::styled(title, title_style))
+        .borders(Borders::ALL)
+        .border_style(border_style);
+
+    let inner = card_block.inner(area);
+    frame.render_widget(card_block, area);
+
+    // Build card content
     let mut lines: Vec<Line> = Vec::new();
 
-    // Line 1: Status indicator + Name
-    let mut name_spans = Vec::new();
-    if app.is_waiting_for_input(session) {
-        let indicator_style = if is_selected {
-            Style::default().fg(Color::Yellow).bg(Color::Yellow).add_modifier(Modifier::BOLD)
-        } else {
-            Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
-        };
-        name_spans.push(Span::styled("? ", indicator_style));
-    } else if app.has_active_terminal(session) {
-        let indicator_style = if is_selected {
-            Style::default().fg(Color::Green).bg(Color::Yellow).add_modifier(Modifier::BOLD)
-        } else {
-            Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)
-        };
-        name_spans.push(Span::styled("$ ", indicator_style));
-    }
-    name_spans.push(Span::styled(session.name.clone(), name_style));
-    lines.push(Line::from(name_spans));
-
-    // Line 2: Branch name (if active terminal)
+    // Branch name (if active terminal)
     if let Some(ref tmux_name) = session.tmux_window {
         if app.active_tmux_sessions.contains(tmux_name) {
             if let Some(branch) = tmux::get_git_branch(tmux_name) {
-                let branch_style = if is_selected {
-                    Style::default().fg(Color::Blue).bg(Color::Yellow)
-                } else {
-                    Style::default().fg(Color::Blue)
-                };
                 lines.push(Line::from(vec![
-                    Span::styled("  ⎇ ", branch_style),
-                    Span::styled(branch, branch_style),
+                    Span::styled("⎇ ", Style::default().fg(Color::Blue)),
+                    Span::styled(branch, Style::default().fg(Color::Blue)),
                 ]));
             }
         }
     }
 
-    // Lines 3+: Custom field values
+    // Custom field values
     for field in &app.fields {
         let value = app.db.get_session_field_value(session.id, field.id).unwrap_or_default();
         if !value.is_empty() {
             lines.push(Line::from(vec![
-                Span::styled(format!("  {}: ", field.name), detail_style),
-                Span::styled(value, detail_style),
+                Span::styled(format!("{}: ", field.name), detail_style),
+                Span::styled(value, Style::default().fg(Color::White)),
             ]));
         }
     }
 
-    // Add separator line for visual spacing
-    lines.push(Line::from(""));
-
-    ListItem::new(lines)
+    let content = Paragraph::new(lines);
+    frame.render_widget(content, inner);
 }
 
 fn render_kanban_footer(frame: &mut Frame, area: Rect) {
