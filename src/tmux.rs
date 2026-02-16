@@ -86,6 +86,43 @@ pub fn capture_pane_content(name: &str) -> Option<String> {
     }
 }
 
+/// Get the current working directory of a tmux pane
+pub fn get_pane_cwd(name: &str) -> Option<String> {
+    let output = Command::new("tmux")
+        .args(["display-message", "-t", name, "-p", "#{pane_current_path}"])
+        .output()
+        .ok()?;
+    if output.status.success() {
+        let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        if path.is_empty() {
+            None
+        } else {
+            Some(path)
+        }
+    } else {
+        None
+    }
+}
+
+/// Get the git branch name for a tmux session's current directory
+pub fn get_git_branch(name: &str) -> Option<String> {
+    let cwd = get_pane_cwd(name)?;
+    let output = Command::new("git")
+        .args(["-C", &cwd, "rev-parse", "--abbrev-ref", "HEAD"])
+        .output()
+        .ok()?;
+    if output.status.success() {
+        let branch = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        if branch.is_empty() {
+            None
+        } else {
+            Some(branch)
+        }
+    } else {
+        None
+    }
+}
+
 /// Check if a tmux session is waiting for user input by examining pane content
 pub fn is_waiting_for_input(name: &str) -> bool {
     let output = Command::new("tmux")

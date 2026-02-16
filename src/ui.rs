@@ -7,7 +7,7 @@ use ratatui::{
 };
 
 use crate::app::{App, InputMode, View};
-use crate::db::Status;
+use crate::db::{Session, Status};
 use crate::tmux;
 
 pub fn render(app: &App, frame: &mut Frame) {
@@ -178,53 +178,7 @@ fn render_kanban(app: &App, frame: &mut Frame, area: Rect) {
             .iter()
             .enumerate()
             .map(|(row_idx, session)| {
-                let is_selected = is_selected_column && row_idx == app.selected_row;
-                let style = if is_selected {
-                    Style::default()
-                        .fg(Color::Black)
-                        .bg(Color::Yellow)
-                        .add_modifier(Modifier::BOLD)
-                } else {
-                    Style::default().fg(Color::White)
-                };
-
-                let mut spans = Vec::new();
-
-                // Add yellow ? indicator for sessions waiting for input, or green $ for active terminals
-                if app.is_waiting_for_input(session) {
-                    let indicator_style = if is_selected {
-                        Style::default()
-                            .fg(Color::Yellow)
-                            .bg(Color::Yellow)
-                            .add_modifier(Modifier::BOLD)
-                    } else {
-                        Style::default()
-                            .fg(Color::Yellow)
-                            .add_modifier(Modifier::BOLD)
-                    };
-                    spans.push(Span::styled("? ", indicator_style));
-                } else if app.has_active_terminal(session) {
-                    let indicator_style = if is_selected {
-                        Style::default()
-                            .fg(Color::Green)
-                            .bg(Color::Yellow)
-                            .add_modifier(Modifier::BOLD)
-                    } else {
-                        Style::default()
-                            .fg(Color::Green)
-                            .add_modifier(Modifier::BOLD)
-                    };
-                    spans.push(Span::styled("$ ", indicator_style));
-                }
-
-                let content = if let Some(ticket) = &session.ticket_id {
-                    format!("[{}] {}", ticket, session.name)
-                } else {
-                    session.name.clone()
-                };
-                spans.push(Span::styled(content, style));
-
-                ListItem::new(Line::from(spans))
+                render_session_card(app, session, is_selected_column, row_idx)
             })
             .collect();
 
@@ -238,6 +192,80 @@ fn render_kanban(app: &App, frame: &mut Frame, area: Rect) {
 
         frame.render_widget(list, columns[col_idx]);
     }
+}
+
+fn render_session_card<'a>(app: &App, session: &Session, is_selected_column: bool, row_idx: usize) -> ListItem<'a> {
+    let is_selected = is_selected_column && row_idx == app.selected_row;
+
+    let name_style = if is_selected {
+        Style::default()
+            .fg(Color::Black)
+            .bg(Color::Yellow)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(Color::White).add_modifier(Modifier::BOLD)
+    };
+
+    let detail_style = if is_selected {
+        Style::default().fg(Color::Black).bg(Color::Yellow)
+    } else {
+        Style::default().fg(Color::DarkGray)
+    };
+
+    let mut lines: Vec<Line> = Vec::new();
+
+    // Line 1: Status indicator + Name
+    let mut name_spans = Vec::new();
+    if app.is_waiting_for_input(session) {
+        let indicator_style = if is_selected {
+            Style::default().fg(Color::Yellow).bg(Color::Yellow).add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
+        };
+        name_spans.push(Span::styled("? ", indicator_style));
+    } else if app.has_active_terminal(session) {
+        let indicator_style = if is_selected {
+            Style::default().fg(Color::Green).bg(Color::Yellow).add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)
+        };
+        name_spans.push(Span::styled("$ ", indicator_style));
+    }
+    name_spans.push(Span::styled(session.name.clone(), name_style));
+    lines.push(Line::from(name_spans));
+
+    // Line 2: Branch name (if active terminal)
+    if let Some(ref tmux_name) = session.tmux_window {
+        if app.active_tmux_sessions.contains(tmux_name) {
+            if let Some(branch) = tmux::get_git_branch(tmux_name) {
+                let branch_style = if is_selected {
+                    Style::default().fg(Color::Blue).bg(Color::Yellow)
+                } else {
+                    Style::default().fg(Color::Blue)
+                };
+                lines.push(Line::from(vec![
+                    Span::styled("  ⎇ ", branch_style),
+                    Span::styled(branch, branch_style),
+                ]));
+            }
+        }
+    }
+
+    // Lines 3+: Custom field values
+    for field in &app.fields {
+        let value = app.db.get_session_field_value(session.id, field.id).unwrap_or_default();
+        if !value.is_empty() {
+            lines.push(Line::from(vec![
+                Span::styled(format!("  {}: ", field.name), detail_style),
+                Span::styled(value, detail_style),
+            ]));
+        }
+    }
+
+    // Add separator line for visual spacing
+    lines.push(Line::from(""));
+
+    ListItem::new(lines)
 }
 
 fn render_kanban_footer(frame: &mut Frame, area: Rect) {
