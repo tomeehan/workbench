@@ -76,6 +76,14 @@ pub struct Field {
     pub visible: bool,
 }
 
+#[derive(Debug, Clone)]
+pub struct Comment {
+    pub id: i64,
+    pub session_id: i64,
+    pub text: String,
+    pub created_at: String,
+}
+
 pub struct Database {
     conn: Connection,
 }
@@ -151,6 +159,14 @@ impl Database {
                 FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE,
                 FOREIGN KEY (field_id) REFERENCES fields(id) ON DELETE CASCADE,
                 UNIQUE(session_id, field_id)
+            );
+
+            CREATE TABLE IF NOT EXISTS comments (
+                id INTEGER PRIMARY KEY,
+                session_id INTEGER NOT NULL,
+                text TEXT NOT NULL,
+                created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
             );
             ",
         )?;
@@ -270,6 +286,14 @@ impl Database {
         self.conn.execute(
             "UPDATE sessions SET tmux_window = NULL, updated_at = CURRENT_TIMESTAMP WHERE id = ?1",
             params![session_id],
+        )?;
+        Ok(())
+    }
+
+    pub fn update_session_worktree(&self, session_id: i64, checkout_path: &str, branch_name: &str) -> Result<()> {
+        self.conn.execute(
+            "UPDATE sessions SET checkout_path = ?1, branch_name = ?2, updated_at = CURRENT_TIMESTAMP WHERE id = ?3",
+            params![checkout_path, branch_name, session_id],
         )?;
         Ok(())
     }
@@ -394,5 +418,39 @@ impl Database {
             Ok((row.get(0)?, row.get(1)?))
         })?;
         values.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+    }
+
+    pub fn list_comments(&self, session_id: i64) -> Result<Vec<Comment>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, session_id, text, created_at FROM comments WHERE session_id = ?1 ORDER BY created_at DESC",
+        )?;
+        let comments = stmt.query_map(params![session_id], |row| {
+            Ok(Comment {
+                id: row.get(0)?,
+                session_id: row.get(1)?,
+                text: row.get(2)?,
+                created_at: row.get(3)?,
+            })
+        })?;
+        comments.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+    }
+
+    pub fn create_comment(&self, session_id: i64, text: &str) -> Result<Comment> {
+        self.conn.execute(
+            "INSERT INTO comments (session_id, text) VALUES (?1, ?2)",
+            params![session_id, text],
+        )?;
+        let id = self.conn.last_insert_rowid();
+        let created_at: String = self.conn.query_row(
+            "SELECT created_at FROM comments WHERE id = ?1",
+            params![id],
+            |row| row.get(0),
+        )?;
+        Ok(Comment {
+            id,
+            session_id,
+            text: text.to_string(),
+            created_at,
+        })
     }
 }

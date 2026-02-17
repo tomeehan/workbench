@@ -1,6 +1,7 @@
 mod ai;
 mod app;
 mod db;
+mod git;
 mod tmux;
 mod tui;
 mod ui;

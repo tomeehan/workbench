@@ -6,7 +6,8 @@ use std::time::Duration;
 use color_eyre::Result;
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers};
 
-use crate::db::{Database, Field, Project, Session, Status};
+use crate::db::{Comment, Database, Field, Project, Session, Status};
+use crate::git::{self, DirtyStatus};
 use crate::tmux;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -23,11 +24,14 @@ pub enum InputMode {
     EditSession,
     MoveSession,
     ConfirmDelete,
+    ConfirmDeleteDirty,
     ConfirmDeleteField,
     NewFieldName,
     NewFieldDesc,
     EditFieldName,
     EditFieldDesc,
+    ViewComments,
+    NewComment,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -47,6 +51,7 @@ pub struct App {
     pub should_quit: bool,
     pub db: Database,
     pub project: Project,
+    pub repo_root: Option<String>,
     pub sessions: Vec<Session>,
     pub selected_column: usize,
     pub selected_row: usize,
@@ -57,6 +62,7 @@ pub struct App {
     pub editing_session_id: Option<i64>,
     pub moving_session_id: Option<i64>,
     pub deleting_session_id: Option<i64>,
+    pub deleting_dirty_status: Option<DirtyStatus>,
     pub peek_active: bool,
     pub edit_row: usize,
     pub edit_session_name: String,
@@ -74,19 +80,29 @@ pub struct App {
     pub new_field_name: String,
     pub new_field_desc: String,
     pub status_message: Option<String>,
+    pub comments: Vec<Comment>,
+    pub comments_session_id: Option<i64>,
+    pub new_comment_text: String,
+    pub comments_scroll: usize,
 }
 
 impl App {
     pub fn new() -> Result<Self> {
         let db = Database::new()?;
         let cwd = std::env::current_dir()?;
-        let project_name = cwd
+        let cwd_str = cwd.to_string_lossy().to_string();
+
+        // Use git repo root for project identity (if in a git repo)
+        let repo_root = git::get_repo_root(&cwd_str);
+        let project_path = repo_root.as_ref().unwrap_or(&cwd_str).clone();
+
+        let project_name = std::path::Path::new(&project_path)
             .file_name()
             .and_then(|s| s.to_str())
-            .unwrap_or("unknown");
-        let project_path = cwd.to_string_lossy().to_string();
+            .unwrap_or("unknown")
+            .to_string();
 
-        let project = db.get_or_create_project(project_name, &project_path)?;
+        let project = db.get_or_create_project(&project_name, &project_path)?;
         let sessions = db.list_sessions(project.id)?;
         let fields = db.list_fields(project.id)?;
         let active_tmux_sessions: HashSet<String> = tmux::list_workbench_sessions().into_iter().collect();
@@ -102,6 +118,7 @@ impl App {
             should_quit: false,
             db,
             project,
+            repo_root,
             sessions,
             selected_column: 0,
             selected_row: 0,
@@ -112,6 +129,7 @@ impl App {
             editing_session_id: None,
             moving_session_id: None,
             deleting_session_id: None,
+            deleting_dirty_status: None,
             peek_active: false,
             edit_row: 0,
             edit_session_name: String::new(),
@@ -129,6 +147,10 @@ impl App {
             new_field_name: String::new(),
             new_field_desc: String::new(),
             status_message: None,
+            comments: Vec::new(),
+            comments_session_id: None,
+            new_comment_text: String::new(),
+            comments_scroll: 0,
         })
     }
 
@@ -214,11 +236,14 @@ impl App {
                         InputMode::EditSession => self.handle_edit_session_key(key)?,
                         InputMode::MoveSession => self.handle_move_key(key)?,
                         InputMode::ConfirmDelete => self.handle_confirm_delete_key(key)?,
+                        InputMode::ConfirmDeleteDirty => self.handle_confirm_delete_dirty_key(key)?,
                         InputMode::ConfirmDeleteField => self.handle_confirm_delete_field_key(key)?,
                         InputMode::NewFieldName => self.handle_new_field_name_key(key)?,
                         InputMode::NewFieldDesc => self.handle_new_field_desc_key(key)?,
                         InputMode::EditFieldName => self.handle_edit_field_name_key(key)?,
                         InputMode::EditFieldDesc => self.handle_edit_field_desc_key(key)?,
+                        InputMode::ViewComments => self.handle_view_comments_key(key)?,
+                        InputMode::NewComment => self.handle_new_comment_key(key)?,
                     }
                 }
                 Event::Paste(text) => {
@@ -274,7 +299,19 @@ impl App {
             }
             KeyCode::Char('d') => {
                 if let Some(session) = self.selected_session() {
-                    self.deleting_session_id = Some(session.id);
+                    let session_id = session.id;
+                    let checkout_path = session.checkout_path.clone();
+                    self.deleting_session_id = Some(session_id);
+                    // Check if worktree is dirty
+                    if let Some(checkout_path) = checkout_path {
+                        if let Some(dirty_status) = git::get_dirty_status(&checkout_path) {
+                            if dirty_status.is_dirty() {
+                                self.deleting_dirty_status = Some(dirty_status);
+                                self.input_mode = InputMode::ConfirmDeleteDirty;
+                                return Ok(AppAction::None);
+                            }
+                        }
+                    }
                     self.input_mode = InputMode::ConfirmDelete;
                 }
             }
@@ -311,6 +348,15 @@ impl App {
             }
             KeyCode::Char('x') => {
                 self.cleanup_orphaned_tmux_sessions();
+            }
+            KeyCode::Char('c') => {
+                if let Some(session) = self.selected_session() {
+                    let session_id = session.id;
+                    self.comments_session_id = Some(session_id);
+                    self.comments = self.db.list_comments(session_id).unwrap_or_default();
+                    self.comments_scroll = 0;
+                    self.input_mode = InputMode::ViewComments;
+                }
             }
             _ => {}
         }
@@ -380,8 +426,11 @@ impl App {
             base_name
         };
 
+        // Use checkout_path (worktree) if available, otherwise fall back to project path
+        let working_dir = session.checkout_path.as_ref().unwrap_or(&self.project.path);
+
         // Create a new tmux session
-        tmux::create_session(&tmux_name, &self.project.path)?;
+        tmux::create_session(&tmux_name, working_dir)?;
         self.db.set_tmux_session(session_id, &tmux_name)?;
         self.active_tmux_sessions.insert(tmux_name.clone());
 
@@ -396,7 +445,23 @@ impl App {
             }
             KeyCode::Enter => {
                 if !self.input_buffer.is_empty() {
-                    self.db.create_session(self.project.id, &self.input_buffer)?;
+                    let session = self.db.create_session(self.project.id, &self.input_buffer)?;
+
+                    // Create git worktree if we're in a git repo
+                    if let Some(ref repo_root) = self.repo_root {
+                        let branch_name = git::sanitize_branch_name(&self.input_buffer);
+                        let worktree_path = git::generate_worktree_path(repo_root, &branch_name);
+
+                        match git::create_worktree(repo_root, &branch_name, &worktree_path) {
+                            Ok(()) => {
+                                self.db.update_session_worktree(session.id, &worktree_path, &branch_name)?;
+                            }
+                            Err(e) => {
+                                self.status_message = Some(format!("Worktree error: {}", e));
+                            }
+                        }
+                    }
+
                     self.refresh_sessions()?;
                 }
                 self.input_mode = InputMode::Normal;
@@ -547,6 +612,9 @@ impl App {
             InputMode::EditFieldDesc => {
                 self.new_field_desc.push_str(text);
             }
+            InputMode::NewComment => {
+                self.new_comment_text.push_str(text);
+            }
             _ => {}
         }
     }
@@ -694,10 +762,15 @@ impl App {
         match key.code {
             KeyCode::Char('y') | KeyCode::Char('Y') => {
                 if let Some(session_id) = self.deleting_session_id {
-                    // Find and kill associated tmux session
+                    // Find session to get its details before deletion
                     if let Some(session) = self.sessions.iter().find(|s| s.id == session_id) {
+                        // Kill associated tmux session
                         if let Some(ref tmux_name) = session.tmux_window {
                             tmux::kill_session(tmux_name);
+                        }
+                        // Remove worktree if it exists
+                        if let (Some(repo_root), Some(checkout_path)) = (&self.repo_root, &session.checkout_path) {
+                            let _ = git::remove_worktree(repo_root, checkout_path, false);
                         }
                     }
                     self.db.delete_session(session_id)?;
@@ -710,6 +783,39 @@ impl App {
             KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
                 self.input_mode = InputMode::Normal;
                 self.deleting_session_id = None;
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    fn handle_confirm_delete_dirty_key(&mut self, key: KeyEvent) -> Result<()> {
+        match key.code {
+            KeyCode::Char('y') | KeyCode::Char('Y') => {
+                if let Some(session_id) = self.deleting_session_id {
+                    // Find session to get its details before deletion
+                    if let Some(session) = self.sessions.iter().find(|s| s.id == session_id) {
+                        // Kill associated tmux session
+                        if let Some(ref tmux_name) = session.tmux_window {
+                            tmux::kill_session(tmux_name);
+                        }
+                        // Force remove dirty worktree
+                        if let (Some(repo_root), Some(checkout_path)) = (&self.repo_root, &session.checkout_path) {
+                            let _ = git::remove_worktree(repo_root, checkout_path, true);
+                        }
+                    }
+                    self.db.delete_session(session_id)?;
+                    self.refresh_sessions()?;
+                    self.clamp_row();
+                }
+                self.input_mode = InputMode::Normal;
+                self.deleting_session_id = None;
+                self.deleting_dirty_status = None;
+            }
+            KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
+                self.input_mode = InputMode::Normal;
+                self.deleting_session_id = None;
+                self.deleting_dirty_status = None;
             }
             _ => {}
         }
@@ -899,6 +1005,61 @@ impl App {
             }
             KeyCode::Char(c) => {
                 self.new_field_desc.push(c);
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    fn handle_view_comments_key(&mut self, key: KeyEvent) -> Result<()> {
+        match key.code {
+            KeyCode::Esc | KeyCode::Char('q') => {
+                self.input_mode = InputMode::Normal;
+                self.comments_session_id = None;
+                self.comments.clear();
+                self.comments_scroll = 0;
+            }
+            KeyCode::Char('n') => {
+                self.new_comment_text.clear();
+                self.input_mode = InputMode::NewComment;
+            }
+            KeyCode::Char('j') | KeyCode::Down => {
+                if self.comments_scroll < self.comments.len().saturating_sub(1) {
+                    self.comments_scroll += 1;
+                }
+            }
+            KeyCode::Char('k') | KeyCode::Up => {
+                if self.comments_scroll > 0 {
+                    self.comments_scroll -= 1;
+                }
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    fn handle_new_comment_key(&mut self, key: KeyEvent) -> Result<()> {
+        match key.code {
+            KeyCode::Esc => {
+                self.new_comment_text.clear();
+                self.input_mode = InputMode::ViewComments;
+            }
+            KeyCode::Enter => {
+                if !self.new_comment_text.is_empty() {
+                    if let Some(session_id) = self.comments_session_id {
+                        self.db.create_comment(session_id, &self.new_comment_text)?;
+                        self.comments = self.db.list_comments(session_id).unwrap_or_default();
+                        self.comments_scroll = 0;
+                    }
+                }
+                self.new_comment_text.clear();
+                self.input_mode = InputMode::ViewComments;
+            }
+            KeyCode::Backspace => {
+                self.new_comment_text.pop();
+            }
+            KeyCode::Char(c) => {
+                self.new_comment_text.push(c);
             }
             _ => {}
         }

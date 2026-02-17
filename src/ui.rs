@@ -39,6 +39,10 @@ fn render_kanban_view(app: &App, frame: &mut Frame) {
         render_move_popup(frame);
     } else if app.input_mode == InputMode::ConfirmDelete {
         render_confirm_delete_popup(app, frame);
+    } else if app.input_mode == InputMode::ConfirmDeleteDirty {
+        render_confirm_delete_dirty_popup(app, frame);
+    } else if app.input_mode == InputMode::ViewComments || app.input_mode == InputMode::NewComment {
+        render_comments_popup(app, frame);
     }
 
     if app.peek_active {
@@ -257,16 +261,22 @@ fn render_session_card(app: &App, frame: &mut Frame, session: &Session, is_selec
     // Build card content
     let mut lines: Vec<Line> = Vec::new();
 
-    // Branch name (if active terminal)
-    if let Some(ref tmux_name) = session.tmux_window {
-        if app.active_tmux_sessions.contains(tmux_name) {
-            if let Some(branch) = tmux::get_git_branch(tmux_name) {
-                lines.push(Line::from(vec![
-                    Span::styled("⎇ ", Style::default().fg(Color::Blue)),
-                    Span::styled(branch, Style::default().fg(Color::Blue)),
-                ]));
+    // Branch name - prefer stored branch_name, fall back to tmux detection
+    let branch_to_display = session.branch_name.clone().or_else(|| {
+        session.tmux_window.as_ref().and_then(|tmux_name| {
+            if app.active_tmux_sessions.contains(tmux_name) {
+                tmux::get_git_branch(tmux_name)
+            } else {
+                None
             }
-        }
+        })
+    });
+
+    if let Some(branch) = branch_to_display {
+        lines.push(Line::from(vec![
+            Span::styled("⎇ ", Style::default().fg(Color::Blue)),
+            Span::styled(branch, Style::default().fg(Color::Blue)),
+        ]));
     }
 
     // Custom field values (only visible fields)
@@ -301,7 +311,7 @@ fn render_kanban_footer(app: &App, frame: &mut Frame, area: Rect) {
     let text = if let Some(ref msg) = app.status_message {
         msg.clone()
     } else {
-        "q: quit | n: new | e: edit | Space: peek | hjkl: nav | m: move | d: del | r: refresh | x: cleanup | s: settings | Enter: term".to_string()
+        "q: quit | n: new | e: edit | c: comments | Space: peek | hjkl: nav | m: move | d: del | r: refresh | s: settings | Enter: term".to_string()
     };
     let style = if app.status_message.is_some() {
         Style::default().fg(Color::Green)
@@ -530,6 +540,136 @@ fn render_confirm_delete_popup(app: &App, frame: &mut Frame) {
         .style(Style::default().fg(Color::White))
         .alignment(ratatui::layout::Alignment::Center);
     frame.render_widget(para, inner);
+}
+
+fn render_confirm_delete_dirty_popup(app: &App, frame: &mut Frame) {
+    let session_name = app.deleting_session_id
+        .and_then(|id| app.sessions.iter().find(|s| s.id == id))
+        .map(|s| s.name.as_str())
+        .unwrap_or("this session");
+
+    let area = centered_rect(50, 35, frame.area());
+    frame.render_widget(Clear, area);
+
+    let block = Block::default()
+        .title(" ⚠ Delete Dirty Worktree ")
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Yellow))
+        .style(Style::default().bg(Color::Black));
+
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    let mut lines = vec![
+        format!("Delete \"{}\"?", session_name),
+        String::new(),
+        "Worktree has uncommitted changes:".to_string(),
+    ];
+
+    if let Some(ref dirty) = app.deleting_dirty_status {
+        if dirty.staged > 0 {
+            lines.push(format!("  {} staged change{}", dirty.staged, if dirty.staged == 1 { "" } else { "s" }));
+        }
+        if dirty.unstaged > 0 {
+            lines.push(format!("  {} unstaged change{}", dirty.unstaged, if dirty.unstaged == 1 { "" } else { "s" }));
+        }
+        if dirty.untracked > 0 {
+            lines.push(format!("  {} untracked file{}", dirty.untracked, if dirty.untracked == 1 { "" } else { "s" }));
+        }
+    }
+
+    lines.push(String::new());
+    lines.push("This will PERMANENTLY delete all changes!".to_string());
+    lines.push(String::new());
+    lines.push("(y)es / (n)o".to_string());
+
+    let text = lines.join("\n");
+    let para = Paragraph::new(text)
+        .style(Style::default().fg(Color::Yellow))
+        .alignment(ratatui::layout::Alignment::Center);
+    frame.render_widget(para, inner);
+}
+
+fn render_comments_popup(app: &App, frame: &mut Frame) {
+    let session_name = app.comments_session_id
+        .and_then(|id| app.sessions.iter().find(|s| s.id == id))
+        .map(|s| s.name.as_str())
+        .unwrap_or("Session");
+
+    let area = centered_rect(70, 70, frame.area());
+    frame.render_widget(Clear, area);
+
+    let is_new_comment = app.input_mode == InputMode::NewComment;
+    let help = if is_new_comment {
+        "Enter: save | Esc: cancel"
+    } else {
+        "n: new | jk: scroll | q/Esc: close"
+    };
+
+    let block = Block::default()
+        .title(format!(" Comments: {} ({}) ", session_name, help))
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Cyan))
+        .style(Style::default().bg(Color::Black));
+
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    // Split into comments list and input area (if adding new comment)
+    let chunks = if is_new_comment {
+        Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Min(0), Constraint::Length(3)])
+            .split(inner)
+    } else {
+        Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Min(0)])
+            .split(inner)
+    };
+
+    // Render comments list
+    if app.comments.is_empty() {
+        let empty = Paragraph::new("No comments yet. Press 'n' to add one.")
+            .style(Style::default().fg(Color::DarkGray))
+            .alignment(ratatui::layout::Alignment::Center);
+        frame.render_widget(empty, chunks[0]);
+    } else {
+        let items: Vec<ListItem> = app.comments
+            .iter()
+            .enumerate()
+            .map(|(idx, comment)| {
+                let is_selected = idx == app.comments_scroll;
+                let style = if is_selected {
+                    Style::default().fg(Color::Yellow)
+                } else {
+                    Style::default().fg(Color::White)
+                };
+
+                // Format timestamp (just show date/time portion)
+                let timestamp = &comment.created_at;
+                let header = format!("─ {} ─", timestamp);
+
+                let lines = vec![
+                    Line::from(Span::styled(header, Style::default().fg(Color::DarkGray))),
+                    Line::from(Span::styled(&comment.text, style)),
+                    Line::from(""),
+                ];
+                ListItem::new(lines)
+            })
+            .collect();
+
+        let list = List::new(items);
+        frame.render_widget(list, chunks[0]);
+    }
+
+    // Render input area if adding new comment
+    if is_new_comment {
+        let input = Paragraph::new(app.new_comment_text.as_str())
+            .style(Style::default().fg(Color::Yellow))
+            .block(Block::default().borders(Borders::TOP).title("New Comment"));
+        frame.render_widget(input, chunks[1]);
+    }
 }
 
 fn render_move_popup(frame: &mut Frame) {
