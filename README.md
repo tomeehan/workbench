@@ -2,6 +2,8 @@
 
 A terminal Kanban board for managing work sessions, with tmux and git worktree integration.
 
+![workbench screenshot](screenshot.png)
+
 ## Dependencies
 
 **Required:**
