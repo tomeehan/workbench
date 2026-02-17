@@ -36,12 +36,23 @@ pub fn fill_fields(
     };
 
     let prompt = format!(
-        r#"Given a task/session named "{}", fill in values for these fields based on the name and any context provided. Only fill in fields where you can reasonably infer a value - leave others empty.
+        r#"You are a simple JSON generator. Do NOT use any tools, search, or external lookups.
 
-Fields:
+The user has provided this input:
+---
+{}
+---
+
+Match this input to the following fields. The input might be:
+- A value that belongs in one of the fields (put it there)
+- Contains multiple pieces of info (extract and place in appropriate fields)
+- A ticket ID like "ABC-123" (put in ticket/ID fields)
+- A description or details (put in description fields)
+
+Fields to fill:
 {}
 {}
-Respond with ONLY a JSON array of strings, one value per field in order. Use empty string "" for fields you can't fill. Example: ["value1", "", "value3"]"#,
+Respond with ONLY a JSON array of strings, one value per field in order. Use empty string "" for fields that don't match. Example: ["value1", "", "value3"]"#,
         session_name, fields_desc, context
     );
 

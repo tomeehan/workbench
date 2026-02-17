@@ -73,6 +73,7 @@ pub struct Field {
     pub name: String,
     pub description: String,
     pub display_order: i64,
+    pub visible: bool,
 }
 
 pub struct Database {
@@ -89,7 +90,16 @@ impl Database {
         let conn = Connection::open(&db_path)?;
         let db = Self { conn };
         db.init_schema()?;
+        db.run_migrations();
         Ok(db)
+    }
+
+    fn run_migrations(&self) {
+        // Add visible column to fields if it doesn't exist
+        let _ = self.conn.execute(
+            "ALTER TABLE fields ADD COLUMN visible INTEGER NOT NULL DEFAULT 1",
+            [],
+        );
     }
 
     fn db_path() -> Result<PathBuf> {
@@ -129,6 +139,7 @@ impl Database {
                 name TEXT NOT NULL,
                 description TEXT NOT NULL DEFAULT '',
                 display_order INTEGER NOT NULL DEFAULT 0,
+                visible INTEGER NOT NULL DEFAULT 1,
                 FOREIGN KEY (project_id) REFERENCES projects(id)
             );
 
@@ -265,7 +276,7 @@ impl Database {
 
     pub fn list_fields(&self, project_id: i64) -> Result<Vec<Field>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, project_id, name, description, display_order
+            "SELECT id, project_id, name, description, display_order, visible
              FROM fields WHERE project_id = ?1 ORDER BY display_order, id",
         )?;
 
@@ -276,6 +287,7 @@ impl Database {
                 name: row.get(2)?,
                 description: row.get(3)?,
                 display_order: row.get(4)?,
+                visible: row.get::<_, i64>(5)? != 0,
             })
         })?;
 
@@ -301,6 +313,7 @@ impl Database {
             name: name.to_string(),
             description: description.to_string(),
             display_order: max_order + 1,
+            visible: true,
         })
     }
 
@@ -308,6 +321,14 @@ impl Database {
         self.conn.execute(
             "UPDATE fields SET name = ?1, description = ?2 WHERE id = ?3",
             params![name, description, field_id],
+        )?;
+        Ok(())
+    }
+
+    pub fn toggle_field_visibility(&self, field_id: i64) -> Result<()> {
+        self.conn.execute(
+            "UPDATE fields SET visible = NOT visible WHERE id = ?1",
+            params![field_id],
         )?;
         Ok(())
     }

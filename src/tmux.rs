@@ -46,10 +46,25 @@ pub fn create_session(name: &str, working_dir: &str) -> Result<()> {
     }
 }
 
+/// Check if we're currently inside a tmux session
+pub fn is_inside_tmux() -> bool {
+    std::env::var("TMUX").is_ok_and(|v| !v.is_empty())
+}
+
 /// Attach to an existing tmux session (blocking)
+/// Uses switch-client if already inside tmux, otherwise uses attach-session
 pub fn attach_session(name: &str) -> Result<ExitStatus> {
+    let args = if is_inside_tmux() {
+        vec!["switch-client", "-t", name]
+    } else {
+        vec!["attach-session", "-t", name]
+    };
+
     let status = Command::new("tmux")
-        .args(["attach-session", "-t", name])
+        .args(&args)
+        .stdin(Stdio::inherit())
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::inherit())
         .status()?;
 
     Ok(status)
@@ -71,6 +86,36 @@ pub fn list_workbench_sessions() -> Vec<String> {
         }
         _ => Vec::new(),
     }
+}
+
+/// List tmux sessions for a specific project
+pub fn list_project_sessions(project_id: i64) -> Vec<String> {
+    let prefix = format!("workbench-{}-", project_id);
+    let output = Command::new("tmux")
+        .args(["list-sessions", "-F", "#{session_name}"])
+        .output();
+
+    match output {
+        Ok(output) if output.status.success() => {
+            String::from_utf8_lossy(&output.stdout)
+                .lines()
+                .filter(|name| name.starts_with(&prefix))
+                .map(String::from)
+                .collect()
+        }
+        _ => Vec::new(),
+    }
+}
+
+/// Kill a tmux session by name
+pub fn kill_session(name: &str) -> bool {
+    Command::new("tmux")
+        .args(["kill-session", "-t", name])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
 }
 
 /// Capture the content of a tmux pane

@@ -19,16 +19,20 @@ fn main() -> Result<()> {
         match app.handle_events()? {
             AppAction::None => {}
             AppAction::AttachTmux(name) => {
-                // Restore terminal before attaching to tmux
-                tui::restore()?;
-                drop(terminal);
+                if tmux::is_inside_tmux() {
+                    // Inside tmux: switch-client returns immediately, app keeps running
+                    let _ = tmux::attach_session(&name);
+                    app.refresh_tmux_sessions();
+                } else {
+                    // Outside tmux: attach blocks until detach
+                    tui::restore()?;
+                    drop(terminal);
 
-                // Attach to tmux session (blocking)
-                let _ = tmux::attach_session(&name);
+                    let _ = tmux::attach_session(&name);
 
-                // Re-initialize terminal after tmux detach
-                terminal = tui::init()?;
-                app.refresh_tmux_sessions();
+                    terminal = tui::init()?;
+                    app.refresh_tmux_sessions();
+                }
             }
         }
     }

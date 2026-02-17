@@ -1,4 +1,6 @@
 use std::collections::HashSet;
+use std::sync::mpsc::{self, Receiver};
+use std::thread;
 use std::time::Duration;
 
 use color_eyre::Result;
@@ -20,6 +22,8 @@ pub enum InputMode {
     NewSession,
     EditSession,
     MoveSession,
+    ConfirmDelete,
+    ConfirmDeleteField,
     NewFieldName,
     NewFieldDesc,
     EditFieldName,
@@ -52,18 +56,24 @@ pub struct App {
     pub sessions_waiting_input: HashSet<String>,
     pub editing_session_id: Option<i64>,
     pub moving_session_id: Option<i64>,
+    pub deleting_session_id: Option<i64>,
     pub peek_active: bool,
     pub edit_row: usize,
     pub edit_session_name: String,
     pub edit_field_values: Vec<String>,
     pub edit_mode: EditMode,
-    pub ai_loading: bool,
+    pub ai_input: String,
+    pub ai_running: bool,
+    pub ai_error: Option<String>,
+    pub ai_result_rx: Option<Receiver<Result<Vec<String>, String>>>,
     pub view: View,
     pub fields: Vec<Field>,
     pub selected_field: usize,
     pub editing_field_id: Option<i64>,
+    pub deleting_field_id: Option<i64>,
     pub new_field_name: String,
     pub new_field_desc: String,
+    pub status_message: Option<String>,
 }
 
 impl App {
@@ -101,18 +111,24 @@ impl App {
             sessions_waiting_input,
             editing_session_id: None,
             moving_session_id: None,
+            deleting_session_id: None,
             peek_active: false,
             edit_row: 0,
             edit_session_name: String::new(),
             edit_field_values: Vec::new(),
             edit_mode: EditMode::default(),
-            ai_loading: false,
+            ai_input: String::new(),
+            ai_running: false,
+            ai_error: None,
+            ai_result_rx: None,
             view: View::default(),
             fields,
             selected_field: 0,
             editing_field_id: None,
+            deleting_field_id: None,
             new_field_name: String::new(),
             new_field_desc: String::new(),
+            status_message: None,
         })
     }
 
@@ -174,23 +190,43 @@ impl App {
     }
 
     pub fn handle_events(&mut self) -> Result<AppAction> {
+        // Check for AI results from background thread
+        self.check_ai_result();
+
         if event::poll(Duration::from_millis(100))? {
-            if let Event::Key(key) = event::read()? {
-                match self.input_mode {
-                    InputMode::Normal => {
-                        match self.view {
-                            View::Kanban => return self.handle_normal_key(key),
-                            View::Settings => self.handle_settings_key(key)?,
-                        }
+            match event::read()? {
+                Event::Key(key) => {
+                    // Clear status message on any keypress
+                    self.status_message = None;
+
+                    // Ignore key events while AI is running
+                    if self.ai_running {
+                        return Ok(AppAction::None);
                     }
-                    InputMode::NewSession => self.handle_input_key(key)?,
-                    InputMode::EditSession => self.handle_edit_session_key(key)?,
-                    InputMode::MoveSession => self.handle_move_key(key)?,
-                    InputMode::NewFieldName => self.handle_new_field_name_key(key)?,
-                    InputMode::NewFieldDesc => self.handle_new_field_desc_key(key)?,
-                    InputMode::EditFieldName => self.handle_edit_field_name_key(key)?,
-                    InputMode::EditFieldDesc => self.handle_edit_field_desc_key(key)?,
+                    match self.input_mode {
+                        InputMode::Normal => {
+                            match self.view {
+                                View::Kanban => return self.handle_normal_key(key),
+                                View::Settings => self.handle_settings_key(key)?,
+                            }
+                        }
+                        InputMode::NewSession => self.handle_input_key(key)?,
+                        InputMode::EditSession => self.handle_edit_session_key(key)?,
+                        InputMode::MoveSession => self.handle_move_key(key)?,
+                        InputMode::ConfirmDelete => self.handle_confirm_delete_key(key)?,
+                        InputMode::ConfirmDeleteField => self.handle_confirm_delete_field_key(key)?,
+                        InputMode::NewFieldName => self.handle_new_field_name_key(key)?,
+                        InputMode::NewFieldDesc => self.handle_new_field_desc_key(key)?,
+                        InputMode::EditFieldName => self.handle_edit_field_name_key(key)?,
+                        InputMode::EditFieldDesc => self.handle_edit_field_desc_key(key)?,
+                    }
                 }
+                Event::Paste(text) => {
+                    if !self.ai_running {
+                        self.handle_paste(&text);
+                    }
+                }
+                _ => {}
             }
         }
         Ok(AppAction::None)
@@ -238,10 +274,8 @@ impl App {
             }
             KeyCode::Char('d') => {
                 if let Some(session) = self.selected_session() {
-                    let session_id = session.id;
-                    self.db.delete_session(session_id)?;
-                    self.refresh_sessions()?;
-                    self.clamp_row();
+                    self.deleting_session_id = Some(session.id);
+                    self.input_mode = InputMode::ConfirmDelete;
                 }
             }
             KeyCode::Char('r') => {
@@ -275,9 +309,43 @@ impl App {
                 self.view = View::Settings;
                 self.selected_field = 0;
             }
+            KeyCode::Char('x') => {
+                self.cleanup_orphaned_tmux_sessions();
+            }
             _ => {}
         }
         Ok(AppAction::None)
+    }
+
+    fn cleanup_orphaned_tmux_sessions(&mut self) {
+        // Get all tmux sessions for this project
+        let tmux_sessions = tmux::list_project_sessions(self.project.id);
+
+        // Get all tmux names that are tracked in the database
+        let tracked: std::collections::HashSet<String> = self.sessions
+            .iter()
+            .filter_map(|s| s.tmux_window.clone())
+            .collect();
+
+        // Kill any tmux session that isn't tracked
+        let mut killed = 0;
+        for tmux_name in tmux_sessions {
+            if !tracked.contains(&tmux_name) {
+                if tmux::kill_session(&tmux_name) {
+                    killed += 1;
+                }
+            }
+        }
+
+        // Set status message
+        self.status_message = Some(if killed == 0 {
+            "No orphaned sessions found".to_string()
+        } else {
+            format!("Cleaned up {} orphaned session{}", killed, if killed == 1 { "" } else { "s" })
+        });
+
+        // Refresh the session list
+        self.refresh_tmux_sessions();
     }
 
     fn handle_enter_key(&mut self) -> Result<AppAction> {
@@ -291,12 +359,26 @@ impl App {
         };
 
         let session_id = session.id;
-        let tmux_name = tmux::session_name(self.project.id, session_id);
 
-        // Check if tmux session already exists
-        if tmux::session_exists(&tmux_name) {
-            return Ok(AppAction::AttachTmux(tmux_name));
+        // Use existing tmux_window if available, otherwise generate new name
+        if let Some(ref tmux_name) = session.tmux_window {
+            if tmux::session_exists(tmux_name) {
+                return Ok(AppAction::AttachTmux(tmux_name.clone()));
+            }
         }
+
+        // Generate tmux session name, ensuring uniqueness
+        let base_name = tmux::session_name(self.project.id, session_id);
+        let tmux_name = if tmux::session_exists(&base_name) {
+            // Name collision - add timestamp suffix for uniqueness
+            let ts = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0);
+            format!("{}-{}", base_name, ts)
+        } else {
+            base_name
+        };
 
         // Create a new tmux session
         tmux::create_session(&tmux_name, &self.project.path)?;
@@ -333,6 +415,7 @@ impl App {
 
     fn handle_edit_session_key(&mut self, key: KeyEvent) -> Result<()> {
         let total_rows = 1 + self.fields.len(); // name + custom fields
+
         match key.code {
             KeyCode::Esc => {
                 self.input_mode = InputMode::Normal;
@@ -341,19 +424,33 @@ impl App {
                 self.edit_session_name.clear();
                 self.edit_field_values.clear();
                 self.edit_mode = EditMode::Manual;
+                self.ai_input.clear();
             }
             // Shift+Tab cycles between Manual and AI mode
             KeyCode::BackTab if key.modifiers.contains(KeyModifiers::SHIFT) => {
-                self.save_current_edit_row();
+                if self.edit_mode == EditMode::Manual {
+                    self.save_current_edit_row();
+                }
                 self.edit_mode = match self.edit_mode {
                     EditMode::Manual => EditMode::AI,
                     EditMode::AI => EditMode::Manual,
                 };
-                // If switching to AI mode, run AI fill
-                if self.edit_mode == EditMode::AI {
-                    self.run_ai_fill();
+                if self.edit_mode == EditMode::Manual {
+                    self.load_current_edit_row();
                 }
             }
+            _ => {
+                match self.edit_mode {
+                    EditMode::Manual => self.handle_manual_edit_key(key, total_rows)?,
+                    EditMode::AI => self.handle_ai_edit_key(key)?,
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn handle_manual_edit_key(&mut self, key: KeyEvent, total_rows: usize) -> Result<()> {
+        match key.code {
             KeyCode::Tab | KeyCode::Down => {
                 self.save_current_edit_row();
                 if self.edit_row < total_rows - 1 {
@@ -374,25 +471,7 @@ impl App {
             }
             KeyCode::Enter => {
                 self.save_current_edit_row();
-                if let Some(session_id) = self.editing_session_id {
-                    // Save name
-                    if !self.edit_session_name.is_empty() {
-                        self.db.update_session_name(session_id, &self.edit_session_name)?;
-                    }
-                    // Save all field values
-                    for (i, field) in self.fields.iter().enumerate() {
-                        if let Some(value) = self.edit_field_values.get(i) {
-                            self.db.set_session_field_value(session_id, field.id, value)?;
-                        }
-                    }
-                    self.refresh_sessions()?;
-                }
-                self.input_mode = InputMode::Normal;
-                self.input_buffer.clear();
-                self.editing_session_id = None;
-                self.edit_session_name.clear();
-                self.edit_field_values.clear();
-                self.edit_mode = EditMode::Manual;
+                self.save_and_close_edit()?;
             }
             KeyCode::Backspace => {
                 self.input_buffer.pop();
@@ -402,6 +481,95 @@ impl App {
             }
             _ => {}
         }
+        Ok(())
+    }
+
+    fn handle_ai_edit_key(&mut self, key: KeyEvent) -> Result<()> {
+        match key.code {
+            KeyCode::Tab | KeyCode::Down | KeyCode::Up | KeyCode::BackTab => {
+                // In AI mode, navigation just scrolls through fields (read-only view)
+                let total_rows = 1 + self.fields.len();
+                match key.code {
+                    KeyCode::Tab | KeyCode::Down => {
+                        if self.edit_row < total_rows - 1 {
+                            self.edit_row += 1;
+                        } else {
+                            self.edit_row = 0;
+                        }
+                    }
+                    KeyCode::BackTab | KeyCode::Up => {
+                        if self.edit_row > 0 {
+                            self.edit_row -= 1;
+                        } else {
+                            self.edit_row = total_rows - 1;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            KeyCode::Enter => {
+                // Run AI fill with the ai_input prompt
+                if !self.ai_input.is_empty() {
+                    self.run_ai_fill();
+                }
+            }
+            KeyCode::Backspace => {
+                self.ai_input.pop();
+            }
+            KeyCode::Char(c) => {
+                self.ai_input.push(c);
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    pub fn handle_paste(&mut self, text: &str) {
+        match self.input_mode {
+            InputMode::EditSession if self.edit_mode == EditMode::AI => {
+                self.ai_input.push_str(text);
+            }
+            InputMode::EditSession => {
+                self.input_buffer.push_str(text);
+            }
+            InputMode::NewSession => {
+                self.input_buffer.push_str(text);
+            }
+            InputMode::NewFieldName => {
+                self.new_field_name.push_str(text);
+            }
+            InputMode::NewFieldDesc => {
+                self.new_field_desc.push_str(text);
+            }
+            InputMode::EditFieldName => {
+                self.new_field_name.push_str(text);
+            }
+            InputMode::EditFieldDesc => {
+                self.new_field_desc.push_str(text);
+            }
+            _ => {}
+        }
+    }
+
+    fn save_and_close_edit(&mut self) -> Result<()> {
+        if let Some(session_id) = self.editing_session_id {
+            if !self.edit_session_name.is_empty() {
+                self.db.update_session_name(session_id, &self.edit_session_name)?;
+            }
+            for (i, field) in self.fields.iter().enumerate() {
+                if let Some(value) = self.edit_field_values.get(i) {
+                    self.db.set_session_field_value(session_id, field.id, value)?;
+                }
+            }
+            self.refresh_sessions()?;
+        }
+        self.input_mode = InputMode::Normal;
+        self.input_buffer.clear();
+        self.editing_session_id = None;
+        self.edit_session_name.clear();
+        self.edit_field_values.clear();
+        self.edit_mode = EditMode::Manual;
+        self.ai_input.clear();
         Ok(())
     }
 
@@ -418,24 +586,59 @@ impl App {
         }
 
         // Get tmux pane content if available
-        let pane_content = self.editing_session_id
+        let pane_content: Option<String> = self.editing_session_id
             .and_then(|id| self.sessions.iter().find(|s| s.id == id))
             .and_then(|s| s.tmux_window.as_ref())
             .and_then(|name| tmux::capture_pane_content(name));
 
-        match ai::fill_fields(&self.edit_session_name, &fields, pane_content.as_deref()) {
-            Ok(values) => {
-                // Update field values with AI suggestions
-                for (i, value) in values.into_iter().enumerate() {
-                    if i < self.edit_field_values.len() && !value.is_empty() {
-                        self.edit_field_values[i] = value;
+        // Use ai_input as the prompt, with session name as context
+        let prompt = format!("{}\nSession name: {}", self.ai_input, self.edit_session_name);
+        let num_fields = self.edit_field_values.len();
+
+        // Create channel for receiving results
+        let (tx, rx) = mpsc::channel();
+        self.ai_result_rx = Some(rx);
+        self.ai_running = true;
+
+        // Clear any previous error
+        self.ai_error = None;
+
+        // Spawn background thread
+        thread::spawn(move || {
+            let result = ai::fill_fields(&prompt, &fields, pane_content.as_deref())
+                .map(|mut values| {
+                    values.resize(num_fields, String::new());
+                    values
+                })
+                .map_err(|e| e.to_string());
+            let _ = tx.send(result);
+        });
+    }
+
+    fn check_ai_result(&mut self) {
+        if let Some(ref rx) = self.ai_result_rx {
+            if let Ok(result) = rx.try_recv() {
+                match result {
+                    Ok(values) => {
+                        // Update field values with AI suggestions
+                        for (i, value) in values.into_iter().enumerate() {
+                            if i < self.edit_field_values.len() {
+                                self.edit_field_values[i] = value;
+                            }
+                        }
+                        self.ai_error = None;
+                    }
+                    Err(e) => {
+                        self.ai_error = Some(e);
                     }
                 }
-                // Reload current row to reflect changes
+                // Switch back to manual mode to review/edit
+                self.edit_mode = EditMode::Manual;
+                self.edit_row = 0;
                 self.load_current_edit_row();
-            }
-            Err(_) => {
-                // Silently fail - user can still edit manually
+                self.ai_input.clear();
+                self.ai_running = false;
+                self.ai_result_rx = None;
             }
         }
     }
@@ -487,6 +690,54 @@ impl App {
         Ok(())
     }
 
+    fn handle_confirm_delete_key(&mut self, key: KeyEvent) -> Result<()> {
+        match key.code {
+            KeyCode::Char('y') | KeyCode::Char('Y') => {
+                if let Some(session_id) = self.deleting_session_id {
+                    // Find and kill associated tmux session
+                    if let Some(session) = self.sessions.iter().find(|s| s.id == session_id) {
+                        if let Some(ref tmux_name) = session.tmux_window {
+                            tmux::kill_session(tmux_name);
+                        }
+                    }
+                    self.db.delete_session(session_id)?;
+                    self.refresh_sessions()?;
+                    self.clamp_row();
+                }
+                self.input_mode = InputMode::Normal;
+                self.deleting_session_id = None;
+            }
+            KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
+                self.input_mode = InputMode::Normal;
+                self.deleting_session_id = None;
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    fn handle_confirm_delete_field_key(&mut self, key: KeyEvent) -> Result<()> {
+        match key.code {
+            KeyCode::Char('y') | KeyCode::Char('Y') => {
+                if let Some(field_id) = self.deleting_field_id {
+                    self.db.delete_field(field_id)?;
+                    self.refresh_fields()?;
+                    if self.selected_field >= self.fields.len() && self.selected_field > 0 {
+                        self.selected_field -= 1;
+                    }
+                }
+                self.input_mode = InputMode::Normal;
+                self.deleting_field_id = None;
+            }
+            KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
+                self.input_mode = InputMode::Normal;
+                self.deleting_field_id = None;
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
     fn handle_settings_key(&mut self, key: KeyEvent) -> Result<()> {
         match key.code {
             KeyCode::Char('q') | KeyCode::Esc => {
@@ -520,11 +771,8 @@ impl App {
             }
             KeyCode::Char('d') => {
                 if let Some(field) = self.fields.get(self.selected_field) {
-                    self.db.delete_field(field.id)?;
-                    self.refresh_fields()?;
-                    if self.selected_field >= self.fields.len() && self.selected_field > 0 {
-                        self.selected_field -= 1;
-                    }
+                    self.deleting_field_id = Some(field.id);
+                    self.input_mode = InputMode::ConfirmDeleteField;
                 }
             }
             KeyCode::Char('K') => {
@@ -543,6 +791,12 @@ impl App {
                     if self.selected_field < self.fields.len() - 1 {
                         self.selected_field += 1;
                     }
+                }
+            }
+            KeyCode::Char('v') => {
+                if let Some(field) = self.fields.get(self.selected_field) {
+                    self.db.toggle_field_visibility(field.id)?;
+                    self.refresh_fields()?;
                 }
             }
             _ => {}
