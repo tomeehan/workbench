@@ -1,5 +1,7 @@
 use color_eyre::{eyre::eyre, Result};
-use std::process::Command;
+use std::process::{Command, Stdio};
+use std::time::Duration;
+use std::io::Read;
 
 /// Use Claude CLI to fill in field values based on session name and context
 pub fn fill_fields(
@@ -43,16 +45,36 @@ Respond with ONLY a JSON array of strings, one value per field in order. Use emp
         session_name, fields_desc, context
     );
 
-    let output = Command::new("claude")
-        .args(["-p", &prompt, "--output-format", "json", "--model", "haiku"])
-        .output()
+    let mut child = Command::new("claude")
+        .args(["-p", &prompt, "--output-format", "json", "--model", "haiku", "--max-turns", "1"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
         .map_err(|e| eyre!("Failed to run claude: {}", e))?;
 
-    if !output.status.success() {
-        return Err(eyre!("claude command failed"));
+    // Wait with timeout (30 seconds)
+    let start = std::time::Instant::now();
+    loop {
+        match child.try_wait() {
+            Ok(Some(_status)) => break,
+            Ok(None) => {
+                if start.elapsed() > Duration::from_secs(30) {
+                    let _ = child.kill();
+                    return Err(eyre!("claude command timed out"));
+                }
+                std::thread::sleep(Duration::from_millis(100));
+            }
+            Err(e) => return Err(eyre!("Error waiting for claude: {}", e)),
+        }
     }
 
-    let response: serde_json::Value = serde_json::from_slice(&output.stdout)
+    let mut stdout = String::new();
+    if let Some(mut out) = child.stdout.take() {
+        out.read_to_string(&mut stdout).ok();
+    }
+
+    let response: serde_json::Value = serde_json::from_str(&stdout)
         .map_err(|_| eyre!("Failed to parse claude output as JSON"))?;
 
     // Extract the result text from claude's JSON output
